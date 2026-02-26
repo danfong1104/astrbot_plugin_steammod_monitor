@@ -8,7 +8,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Node, Plain
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.3.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.5.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -22,22 +22,44 @@ class SteamModMonitor(Star):
         self.steam_api_key = self.config.get("steam_api_key", "")
         self.push_template = self.config.get("push_template", "🚨 模组【{mod_name}】已更新！")
         
+        self.auto_reset_enable = self.config.get("auto_reset_enable", False)
+        self.auto_reset_time = self.config.get("auto_reset_time", "04:20").strip()
+        self.auto_reset_message = self.config.get("auto_reset_message", "🌅 早上好！游戏服务器已完成每日例行重启。当前所有模组警报已消除，大家可以放心进入肯塔基州啦！")
+        self.last_reset_date = None 
+        
+        # 新增的服务器探针配置
+        self.server_ip = self.config.get("server_ip", "").strip()
+        self.server_port = self.config.get("server_port", 27015)
+        
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         self.last_update_times = {} 
         self.pending_updates = set() 
         self.is_running = bool(self.push_group_id and self.mod_ids)
         
         for task in asyncio.all_tasks():
-            if task.get_name() == "steam_mod_monitor_loop_task":
+            if task.get_name() in ["steam_mod_monitor_loop_task", "steam_mod_monitor_reset_task"]:
                 task.cancel()
-                logger.info("[Steam模组监控] 🧹 已清理上次重载遗留的旧后台任务。")
+                logger.info(f"[Steam模组监控] 🧹 已清理上次重载遗留的旧后台任务: {task.get_name()}")
 
         if self.is_running:
-            logger.info(f"[Steam模组监控] 插件已启动！目标群:{self.push_group_id}，共载入 {len(self.mod_ids)} 个模组。")
+            logger.info(f"[Steam模组监控] 插件已启动！共载入 {len(self.mod_ids)} 个模组。")
         else:
             logger.warning("[Steam模组监控] 启动挂起：未配置推送群号或模组列表为空。")
 
         self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steam_mod_monitor_loop_task")
+        self.reset_task = asyncio.create_task(self.auto_reset_loop(), name="steam_mod_monitor_reset_task")
+
+    async def tcp_ping(self, host: str, port: int, timeout: int = 3):
+        """核心 TCP 端口探测器"""
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except Exception:
+            return False
 
     @filter.command("steammod")
     async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
@@ -45,21 +67,30 @@ class SteamModMonitor(Star):
         
         if action == "on":
             if not self.push_group_id:
-                yield event.plain_result("❌ 启动失败：请先在后台配置页面设置好 [推送群号]！")
+                yield event.plain_result("❌ 启动失败：请先配置 [推送群号]！")
                 return
             self.is_running = True
-            logger.info("[Steam模组监控] 管理员手动开启了轮询。")
             yield event.plain_result(f"✅ 监控已开启！正在对 {len(self.mod_ids)} 个模组进行高强度巡视。")
             await self.check_steam_updates_with_retry(is_manual=True)
             
         elif action == "off":
             self.is_running = False
-            logger.info("[Steam模组监控] 管理员手动暂停了轮询。")
             yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
             
         elif action == "reset":
             self.pending_updates.clear()
             yield event.plain_result("✅ 状态已重置！所有红灯已清除，目前全库显示为最新（绿灯）状态。")
+            
+        elif action == "ping":
+            if not self.server_ip or not self.server_port:
+                yield event.plain_result("❌ 请先在配置页面填写 [服务器 IP/域名] 和 [探测端口]！")
+                return
+            yield event.plain_result(f"📡 正在 Ping 探测游戏服务器 ({self.server_ip}:{self.server_port}) ...")
+            is_online = await self.tcp_ping(self.server_ip, self.server_port)
+            if is_online:
+                yield event.plain_result("✅ 状态：[在线]\n端口通信正常，说明服务器 100% 启动完毕并已加载所有 Mod。")
+            else:
+                yield event.plain_result("❌ 状态：[离线 / 无响应]\n端口被拒绝，服务器可能未启动、死机或网络异常。")
             
         else:
             if not self.mod_ids:
@@ -69,6 +100,52 @@ class SteamModMonitor(Star):
             yield event.plain_result(f"🔍 正在向 Steam 核对 {len(self.mod_ids)} 个模组的最后更新时间戳，请稍候...")
             async for msg in self.manual_status_check(event):
                 yield msg
+
+    async def auto_reset_loop(self):
+        """带有健康度检查的每日定时重置任务"""
+        await asyncio.sleep(10)
+        while True:
+            if self.is_running and self.auto_reset_enable and self.auto_reset_time:
+                try:
+                    now = datetime.datetime.now()
+                    current_time_str = now.strftime("%H:%M")
+                    current_date_str = now.strftime("%Y-%m-%d")
+                    
+                    if current_time_str == self.auto_reset_time and self.last_reset_date != current_date_str:
+                        logger.info(f"[Steam模组监控] 触发每日定时任务 ({self.auto_reset_time})")
+                        self.last_reset_date = current_date_str # 记录防止死循环
+                        
+                        # 核心拦截逻辑：配置了IP就必须先过安检
+                        if self.server_ip and self.server_port:
+                            logger.info(f"[Steam模组监控] 正在执行定时安检 Ping...")
+                            is_online = await self.tcp_ping(self.server_ip, self.server_port)
+                            if not is_online:
+                                err_msg = (
+                                    f"⚠️ 【服务器宕机告警】\n"
+                                    f"自动重置任务已触发，但 AstrBot 无法连通游戏服 ({self.server_ip}:{self.server_port})！\n"
+                                    f"👉 动作：已中止早安播报与红灯重置。\n"
+                                    f"🛠️ 请服主立刻检查 Docker 容器是否卡死或重启报错！"
+                                )
+                                try:
+                                    await self.context.send_message(self.push_group_id, err_msg)
+                                except Exception:
+                                    pass
+                                continue # 跳过后续的重置逻辑
+                        
+                        # 安检通过（或未配置IP），执行常规重置
+                        self.pending_updates.clear()
+                        if self.auto_reset_message.strip():
+                            try:
+                                await self.context.send_message(self.push_group_id, self.auto_reset_message)
+                            except Exception as e:
+                                logger.error(f"[Steam模组监控] 发送定时重置播报失败: {repr(e)}")
+                                
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"[Steam模组监控] 定时重置任务异常: {repr(e)}")
+                    
+            await asyncio.sleep(20)
 
     async def manual_status_check(self, event: AstrMessageEvent):
         url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
@@ -100,7 +177,6 @@ class SteamModMonitor(Star):
                         if not mod_id:
                             continue
                             
-                        # 转换时间戳为可读日期
                         if current_time > 0:
                             time_str = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M')
                         else:
@@ -174,7 +250,6 @@ class SteamModMonitor(Star):
                         return 
             except Exception as e:
                 if attempt < self.max_retries:
-                    # 降低警告级别，防止刷屏
                     logger.debug(f"[Steam模组监控] 网络波动重试 {attempt}/{self.max_retries}...")
                     await asyncio.sleep(5) 
                 else:
