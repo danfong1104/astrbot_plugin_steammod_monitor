@@ -5,10 +5,9 @@ import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-# 【新增】引入合并转发节点和纯文本组件
 from astrbot.api.message_components import Node, Plain
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.0.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.1.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -110,10 +109,15 @@ class SteamModMonitor(Star):
                     # 1. 构建长文本明细
                     long_text = "【当前服务器模组健康状态明细】\n\n" + "\n".join(lines)
                     
-                    # 2. 包装成一个“合并转发”节点 (Node)
-                    # 使用发送者的 QQ 号作为头像，显得更自然
+                    # 2. 获取正确的发送者 QQ 号 (【关键修复点】)
+                    try:
+                        sender_id = str(event.get_sender_id())
+                    except Exception:
+                        sender_id = "10000" # 兜底防错
+                    
+                    # 3. 包装成一个“合并转发”节点 (Node)
                     forward_node = Node(
-                        uin=event.message_obj.sender_id,
+                        uin=sender_id,
                         custom_name="Steam模组管家",
                         content=[Plain(long_text)]
                     )
@@ -124,7 +128,7 @@ class SteamModMonitor(Star):
                     # 停顿 0.5 秒，防止消息顺序错乱
                     await asyncio.sleep(0.5)
                     
-                    # 3. 单独发送统计总结
+                    # 4. 单独发送统计总结
                     total = len(self.mod_ids)
                     summary = (
                         f"📊 监控状态总结：\n"
