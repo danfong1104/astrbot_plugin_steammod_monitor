@@ -6,7 +6,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.2.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.3.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -15,18 +15,17 @@ class SteamModMonitor(Star):
         self.push_group_id = self.config.get("push_group_id", "").strip()
         self.mod_ids_raw = self.config.get("mod_ids", "")
         self.poll_interval = self.config.get("poll_interval_minutes", 30)
-        self.max_retries = self.config.get("max_retries", 5) # 新增的重试次数
+        self.max_retries = self.config.get("max_retries", 5)
         self.steam_api_base = self.config.get("steam_api_base", "https://api.steampowered.com").rstrip('/')
         self.steam_api_key = self.config.get("steam_api_key", "")
         self.push_template = self.config.get("push_template", "🚨 模组【{mod_name}】已更新！")
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         self.last_update_times = {} 
+        self.pending_updates = set() # 记录自插件启动以来，已经发生更新的模组ID（红灯名单）
         self.is_running = bool(self.push_group_id and self.mod_ids)
         
-        # ==========================================
-        # 【杀手级修复】猎杀热重载产生的“僵尸双份任务”
-        # ==========================================
+        # 清理旧的僵尸任务
         for task in asyncio.all_tasks():
             if task.get_name() == "steam_mod_monitor_loop_task":
                 task.cancel()
@@ -37,26 +36,96 @@ class SteamModMonitor(Star):
         else:
             logger.warning("[Steam模组监控] 启动挂起：未配置推送群号或模组列表为空。")
 
-        # 启动任务时，给它贴上唯一的专属名字，方便下次重载时精准击杀
         self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steam_mod_monitor_loop_task")
 
-    @filter.command("steammod on")
-    async def start_monitor(self, event: AstrMessageEvent):
-        if not self.push_group_id:
-            yield event.plain_result("❌ 启动失败：请先在后台配置页面设置好 [推送群号]！")
-            return
-        self.is_running = True
-        logger.info("[Steam模组监控] 管理员手动开启了轮询。")
-        yield event.plain_result(f"✅ 监控已开启！正在对 {len(self.mod_ids)} 个模组进行高强度巡视。")
-        await self.check_steam_updates_with_retry()
+    @filter.command("steammod")
+    async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
+        """统一指令入口分发"""
+        action = action.strip().lower()
+        
+        if action == "on":
+            if not self.push_group_id:
+                yield event.plain_result("❌ 启动失败：请先在后台配置页面设置好 [推送群号]！")
+                return
+            self.is_running = True
+            logger.info("[Steam模组监控] 管理员手动开启了轮询。")
+            yield event.plain_result(f"✅ 监控已开启！正在对 {len(self.mod_ids)} 个模组进行高强度巡视。")
+            await self.check_steam_updates_with_retry()
+            
+        elif action == "off":
+            self.is_running = False
+            logger.info("[Steam模组监控] 管理员手动暂停了轮询。")
+            yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
+            
+        elif action == "reset":
+            # 重置待更新名单
+            self.pending_updates.clear()
+            yield event.plain_result("✅ 状态已重置！所有红灯已清除，目前全库显示为最新（绿灯）状态。")
+            
+        else:
+            # 默认执行：手动查询全库状态
+            if not self.mod_ids:
+                yield event.plain_result("❌ 模组列表为空，请先在控制台配置。")
+                return
+                
+            yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的最新状态，请稍候...")
+            await self.manual_status_check(event)
 
-    @filter.command("steammod off")
-    async def stop_monitor(self, event: AstrMessageEvent):
-        self.is_running = False
-        logger.info("[Steam模组监控] 管理员手动暂停了轮询。")
-        yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
+    async def manual_status_check(self, event: AstrMessageEvent):
+        """手动获取所有模组状态并返回清单"""
+        url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+        data = {"itemcount": len(self.mod_ids)}
+        for i, mod_id in enumerate(self.mod_ids):
+            data[f"publishedfileids[{i}]"] = mod_id
+        if self.steam_api_key:
+            data["key"] = self.steam_api_key
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                async with session.post(url, data=data) as response:
+                    if response.status != 200:
+                        yield event.plain_result(f"❌ 查询失败，Steam 接口返回状态码: {response.status}")
+                        return
+                        
+                    result = await response.json()
+                    items = result.get('response', {}).get('publishedfiledetails', [])
+                    
+                    lines = []
+                    needs_update_count = 0
+                    
+                    for item in items:
+                        mod_id = str(item.get('publishedfileid', ''))
+                        mod_name = item.get('title', '未知模组')
+                        if not mod_id:
+                            continue
+                        
+                        # 如果该模组在红灯名单里
+                        if mod_id in self.pending_updates:
+                            lines.append(f"🔴 {mod_name} ({mod_id}) - 需更新")
+                            needs_update_count += 1
+                        else:
+                            lines.append(f"🟢 {mod_name} ({mod_id})")
+                    
+                    # 生成底部总结
+                    total = len(self.mod_ids)
+                    summary = (
+                        f"\n━━━━━━━━━━━━━━━━\n"
+                        f"📊 总结：共监控 {total} 个模组，需要更新的有 {needs_update_count} 个 ({needs_update_count}/{total})"
+                    )
+                    
+                    if needs_update_count > 0:
+                        summary += "\n💡 提示：您重启游戏服务器后，可发送 /steammod reset 来消除红灯报错。"
+                    
+                    # 组合最终消息体
+                    msg = "【当前服务器模组健康状态】\n" + "\n".join(lines) + summary
+                    yield event.plain_result(msg)
+                    
+        except Exception as e:
+            yield event.plain_result(f"❌ 手动查询出现网络异常: {repr(e)}")
 
     async def monitor_loop(self):
+        """核心后台轮询死循环"""
         await asyncio.sleep(5) 
         while True:
             if self.is_running:
@@ -64,10 +133,9 @@ class SteamModMonitor(Star):
                 try:
                     await self.check_steam_updates_with_retry()
                 except asyncio.CancelledError:
-                    break # 被系统猎杀时安静地离开，不报错
+                    break 
                 except Exception as e:
                     logger.error(f"[Steam模组监控] 未知异常: {repr(e)}")
-            
             await asyncio.sleep(self.poll_interval * 60)
 
     async def check_steam_updates_with_retry(self):
@@ -76,38 +144,32 @@ class SteamModMonitor(Star):
         data = {"itemcount": len(self.mod_ids)}
         for i, mod_id in enumerate(self.mod_ids):
             data[f"publishedfileids[{i}]"] = mod_id
-            
         if self.steam_api_key:
             data["key"] = self.steam_api_key
 
         timeout = aiohttp.ClientTimeout(total=30)
-        
-        # 重试循环机制
         for attempt in range(1, self.max_retries + 1):
             try:
-                # 【魔法参数】trust_env=True：强制让 aiohttp 走你的 Docker 系统代理！
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                     async with session.post(url, data=data) as response:
                         if response.status != 200:
-                            logger.error(f"[Steam模组监控] Steam 接口返回失败代码: {response.status} (第 {attempt} 次尝试)")
+                            logger.error(f"[Steam模组监控] 接口报错: {response.status} (第{attempt}次)")
                             if attempt < self.max_retries:
-                                await asyncio.sleep(5) # 失败等5秒再重试
+                                await asyncio.sleep(5)
                                 continue
                             return
-                            
                         result = await response.json()
                         await self.process_result(result)
-                        return # 成功拿到数据，直接结束整个函数，不再重试
-                        
+                        return 
             except Exception as e:
                 if attempt < self.max_retries:
-                    logger.warning(f"[Steam模组监控] ⚠️ 网络连接异常，正在进行第 {attempt}/{self.max_retries} 次重试... ({repr(e)})")
+                    logger.warning(f"[Steam模组监控] ⚠️ 网络异常，重试 {attempt}/{self.max_retries}...")
                     await asyncio.sleep(5) 
                 else:
-                    logger.error(f"[Steam模组监控] ❌ 已达到最大重试次数({self.max_retries})，本轮轮询彻底失败！最终报错: {repr(e)}")
+                    logger.error(f"[Steam模组监控] ❌ 已达最大重试次数！最终报错: {repr(e)}")
 
     async def process_result(self, result):
-        """解析 JSON 数据的拆分函数"""
+        """解析 JSON 并处理报警"""
         items = result.get('response', {}).get('publishedfiledetails', [])
         updated_count = 0
         
@@ -119,24 +181,28 @@ class SteamModMonitor(Star):
             if not mod_id or current_time == 0:
                 continue
                 
+            # 初始化基准时间戳
             if mod_id not in self.last_update_times:
                 self.last_update_times[mod_id] = current_time
                 continue
                 
+            # 对比时间戳，发现更新
             if current_time > self.last_update_times[mod_id]:
                 logger.info(f"[Steam模组监控] 🚨 发现更新！模组: {mod_name}")
                 self.last_update_times[mod_id] = current_time
+                self.pending_updates.add(mod_id) # 加入红灯名单
                 updated_count += 1
                 await self.push_alert(mod_id, mod_name)
                 
         if updated_count > 0:
-            logger.info(f"[Steam模组监控] 本轮检查完毕，共发现 {updated_count} 个模组有更新。")
+            logger.info(f"[Steam模组监控] 本轮检查完毕，发现 {updated_count} 个更新。")
         else:
             logger.info(f"[Steam模组监控] 本轮检查完毕，所有模组均为最新。")
 
     async def push_alert(self, mod_id: str, mod_name: str):
+        """群组推送"""
         msg_text = self.push_template.replace("{mod_name}", mod_name).replace("{mod_id}", mod_id)
         try:
             await self.context.send_message(self.push_group_id, msg_text)
         except Exception as e:
-            logger.error(f"[Steam模组监控] 消息推送到群 {self.push_group_id} 失败: {repr(e)}")
+            logger.error(f"[Steam模组监控] 推送失败: {repr(e)}")
