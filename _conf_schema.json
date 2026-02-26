@@ -8,7 +8,7 @@
     "poll_interval_minutes": {
         "title": "轮询周期（分钟）",
         "description": "建议设置在 30~60 分钟，太频繁会被 Steam 封禁 IP。",
-        "type": "number",
+        "type": "int",
         "default": 30
     },
     "steam_api_key": {
