@@ -22,15 +22,15 @@ class AsyncRCON:
         self.reader, self.writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), timeout=5.0
         )
-        await self._send(3, self.password) # 3: SERVERDATA_AUTH
+        await self._send(3, self.password) 
         resp = await self._read()
         if resp.get('id') == -1:
             raise Exception("RCON 认证失败：密码错误或被拒绝")
 
     async def execute(self, command):
-        await self._send(2, command) # 2: SERVERDATA_EXECCOMMAND
+        await self._send(2, command) 
         resp = await self._read()
-        return resp.get('body')
+        return resp.get('body', '')
 
     async def _send(self, packet_type, body):
         body_encoded = body.encode('utf-8')
@@ -53,7 +53,7 @@ class AsyncRCON:
             self.writer.close()
             await self.writer.wait_closed()
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与 RCON 控制插件", "4.0.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与零玩家侦测插件", "5.2.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -65,30 +65,37 @@ class SteamModMonitor(Star):
         self.max_retries = self.config.get("max_retries", 5)
         self.steam_api_base = self.config.get("steam_api_base", "https://api.steampowered.com").rstrip('/')
         self.steam_api_key = self.config.get("steam_api_key", "")
-        self.push_template = self.config.get("push_template", "🚨 模组【{mod_name}】已更新！")
         
         self.auto_reset_enable = self.config.get("auto_reset_enable", False)
         self.auto_reset_time = self.config.get("auto_reset_time", "04:20").strip()
-        self.auto_reset_message = self.config.get("auto_reset_message", "🌅 早上好！游戏服务器已完成每日例行重启。")
         self.last_reset_date = None 
         
         self.server_ip = self.config.get("server_ip", "").strip()
         self.server_port = self.config.get("server_port", 27015)
         self.server_rcon_password = self.config.get("server_rcon_password", "").strip()
-        self.server_rcon_broadcast = self.config.get("server_rcon_broadcast", "Warning! Server will RESTART!")
-        self.server_rcon_countdown = self.config.get("server_rcon_countdown", 60)
+        
+        self.server_rcon_broadcast = self.config.get("server_rcon_broadcast", "查询到模组有更新，不影响您本次游玩，您游戏结束1小时后会自动更新，如需要强制更新，请联系麻花！")
+        self.server_rcon_countdown = self.config.get("server_rcon_countdown", 5)
+        
+        self.server_rcon_manual_broadcast = self.config.get("server_rcon_manual_broadcast", "服务器将在60秒后强制重启更新模组，请尽快找到安全的地方等待！")
+        self.server_rcon_manual_countdown = self.config.get("server_rcon_manual_countdown", 60)
+        
+        # 新增：重启后首次健康检测等待时间（分钟转秒）
+        self.server_restart_wait_minutes = self.config.get("server_restart_wait_minutes", 6)
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         self.last_update_times = {} 
-        self.pending_updates = set() 
+        self.pending_updates = {} 
         self.is_running = bool(self.push_group_id and self.mod_ids)
+        self.is_restarting = False 
+        self.broadcast_sent_for_current_updates = False 
         
         for task in asyncio.all_tasks():
             if task.get_name() in ["steam_mod_monitor_loop_task", "steam_mod_monitor_reset_task"]:
                 task.cancel()
 
         if self.is_running:
-            logger.info(f"[Steam模组监控] 插件 v4.0.0 启动完毕！共监控 {len(self.mod_ids)} 个模组。")
+            logger.info(f"[Steam模组监控] 插件 v5.2.0 启动完毕！探针延迟设为 {self.server_restart_wait_minutes} 分钟。")
             
         self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steam_mod_monitor_loop_task")
         self.reset_task = asyncio.create_task(self.auto_reset_loop(), name="steam_mod_monitor_reset_task")
@@ -104,95 +111,124 @@ class SteamModMonitor(Star):
         except Exception:
             return False
 
+    async def get_online_players(self):
+        if not self.server_ip or not self.server_port or not self.server_rcon_password:
+            return -1
+        rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
+        try:
+            await rcon.connect()
+            resp = await rcon.execute("players")
+            await rcon.close()
+            match = re.search(r'Players connected \((\d+)\)', resp)
+            if match:
+                return int(match.group(1))
+            return 0 
+        except Exception as e:
+            logger.error(f"[Steam模组监控] 获取玩家人数失败: {repr(e)}")
+            return -1
+
+    async def verify_server_health(self, silent_success=False):
+        wait_seconds = self.server_restart_wait_minutes * 60
+        logger.info(f"[Steam模组监控] 进入健康度等待周期，预计 {wait_seconds} 秒 ({self.server_restart_wait_minutes}分钟) 后进行初次探针测试...")
+        await asyncio.sleep(wait_seconds) 
+        
+        is_online = await self.tcp_ping(self.server_ip, self.server_port)
+        if not is_online:
+            logger.warning("[Steam模组监控] ⚠️ 初次 Ping 失败！进入 3 分钟容错等待周期...")
+            await asyncio.sleep(180) 
+            is_online = await self.tcp_ping(self.server_ip, self.server_port)
+            
+        if is_online:
+            logger.info("[Steam模组监控] ✅ 探针测试通过，服务器已恢复在线！")
+            self.pending_updates.clear() 
+            self.broadcast_sent_for_current_updates = False
+            self.is_restarting = False
+            
+            if not silent_success:
+                success_msg = (
+                    f"✅ 【服务器已重启成功】\n"
+                    f"Ping 连通性检测正常！最新模组已加载完毕，红灯预警已自动消除。\n"
+                    f"🎮 大家可以进入游戏游玩啦！"
+                )
+                try:
+                    await self.context.send_message(self.push_group_id, success_msg)
+                except: pass
+        else:
+            logger.error("[Steam模组监控] ❌ 严重错误：经过 3 分钟重试，服务器依然离线！")
+            self.is_restarting = False
+            fail_msg = (
+                f"❌ 【服务器宕机严重告警】\n"
+                f"服务器在执行重启后未能正常恢复开服！\n"
+                f"经过 {self.server_restart_wait_minutes}分钟初始等待 + 3 分钟延时重试，TCP 端口依然被拒绝。\n"
+                f"🛠️ 请立刻检查 Docker 容器或服务端崩溃日志！"
+            )
+            try:
+                await self.context.send_message(self.push_group_id, fail_msg)
+            except: pass
+
     @filter.command("steammod")
     async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
         action = action.strip().lower()
-        
         if action == "on":
-            if not self.push_group_id:
-                yield event.plain_result("❌ 启动失败：请先配置 [推送群号]！")
-                return
             self.is_running = True
             yield event.plain_result(f"✅ 监控已开启！正在对 {len(self.mod_ids)} 个模组进行高强度巡视。")
             await self.check_steam_updates_with_retry(is_manual=True)
-            
         elif action == "off":
             self.is_running = False
             yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
-            
         elif action == "reset":
             self.pending_updates.clear()
-            yield event.plain_result("✅ 状态已重置！所有红灯已清除。")
-            
+            self.broadcast_sent_for_current_updates = False
+            yield event.plain_result("✅ 状态已强制人工重置！")
         elif action == "ping":
-            if not self.server_ip or not self.server_port:
-                yield event.plain_result("❌ 请先在配置页面填写 [服务器 IP/域名] 和 [探测端口]！")
+            if not self.server_ip:
+                yield event.plain_result("❌ 未配置服务器 IP。")
                 return
             yield event.plain_result(f"📡 正在 Ping 探测游戏服务器 ({self.server_ip}:{self.server_port}) ...")
-            is_online = await self.tcp_ping(self.server_ip, self.server_port)
-            if is_online:
-                yield event.plain_result("✅ 状态：[在线]\n端口通信正常，说明服务器 100% 启动完毕并已加载所有 Mod。")
+            if await self.tcp_ping(self.server_ip, self.server_port):
+                yield event.plain_result("✅ 状态：[在线]\n端口通信正常，说明服务器 100% 启动完毕。")
             else:
-                yield event.plain_result("❌ 状态：[离线 / 无响应]\n端口被拒绝，服务器可能未启动、死机或网络异常。")
-                
+                yield event.plain_result("❌ 状态：[离线 / 无响应]\n端口被拒绝，服务器未启动或死机。")
         elif action == "restart":
-            # 核心杀招：执行 RCON 安全重启方案
-            if not self.server_ip or not self.server_port or not self.server_rcon_password:
-                yield event.plain_result("❌ 缺少 RCON 配置信息，请在控制台填好 IP、端口和 RCON 密码！")
+            if not self.server_ip or not self.server_rcon_password:
+                yield event.plain_result("❌ RCON 配置不全。")
                 return
-            
-            yield event.plain_result(f"⚡ 正在连接服务器 RCON 执行安全保存与关机程序，等待倒计时 {self.server_rcon_countdown} 秒...")
-            
-            # 使用协程后台执行，不阻塞机器人收发消息
-            asyncio.create_task(self.execute_rcon_restart(event))
-            
+            yield event.plain_result(f"⚡ 收到手动重启指令！已下发【{self.server_rcon_manual_countdown}秒】强制重启广播...")
+            self.is_restarting = True
+            asyncio.create_task(self.execute_rcon_restart(is_auto=False))
         else:
-            if not self.mod_ids:
-                yield event.plain_result("❌ 模组列表为空，请先在控制台配置。")
-                return
             yield event.plain_result(f"🔍 正在向 Steam 核对 {len(self.mod_ids)} 个模组的最后更新时间，请稍候...")
             async for msg in self.manual_status_check(event):
                 yield msg
 
-    async def execute_rcon_restart(self, event: AstrMessageEvent):
-        """执行全套 RCON 丝滑安全关机连招"""
+    async def execute_rcon_restart(self, is_auto=True):
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
             await rcon.connect()
-            logger.info("[Steam模组监控] RCON 连接并认证成功！")
             
-            # 1. 游戏内发广播
-            clean_msg = self.server_rcon_broadcast.replace('"', "'") # 防止双引号语法错误
-            await rcon.execute(f'servermsg "{clean_msg}"')
-            logger.info(f"[Steam模组监控] 已发送全服广播: {clean_msg}")
-            
-            # 2. 等待群主设定的倒计时
-            await asyncio.sleep(self.server_rcon_countdown)
-            
-            # 3. 强制保存进度
+            if is_auto:
+                await asyncio.sleep(self.server_rcon_countdown)
+            else:
+                clean_msg = self.server_rcon_manual_broadcast.replace('"', "'")
+                await rcon.execute(f'servermsg "{clean_msg}"')
+                logger.info(f"[Steam模组监控] 已向游戏内发送人工强制重启广播。")
+                await asyncio.sleep(self.server_rcon_manual_countdown)
+                
             await rcon.execute("save")
-            logger.info("[Steam模组监控] 执行 Save 保存指令完毕。")
-            await asyncio.sleep(5) # 给硬盘一点写入时间
-            
-            # 4. 优雅关机
+            await asyncio.sleep(5) 
             await rcon.execute("quit")
-            logger.info("[Steam模组监控] 执行 Quit 关机指令完毕。")
-            
             await rcon.close()
             
-            success_msg = (
-                f"✅ 【指令下达成功】\n"
-                f"已完美执行：全服广播 -> 倒计时 -> 存档保护 -> 安全退出！\n"
-                f"💡 游戏进程现已结束。若您的 Docker 已开启“自动重启”策略，服务器将在几十秒后带着最新模组王者归来！\n"
-                f"（稍后可使用 /steammod ping 检查是否重启开服成功）"
-            )
-            await self.context.send_message(event.message_obj.group_id, success_msg)
+            logger.info("[Steam模组监控] Quit 指令已发送，移交健康探针接管。")
+            asyncio.create_task(self.verify_server_health(silent_success=False))
             
         except Exception as e:
-            logger.error(f"[Steam模组监控] RCON 重启任务失败: {repr(e)}")
-            await self.context.send_message(event.message_obj.group_id, f"❌ RCON 任务执行失败：\n{repr(e)}\n请检查密码是否正确，或服务器是否已经离线。")
-            if rcon:
-                await rcon.close()
+            logger.error(f"[Steam模组监控] RCON 重启失败: {repr(e)}")
+            self.is_restarting = False
+            try:
+                await self.context.send_message(self.push_group_id, f"❌ RCON 触发重启失败：{repr(e)}。无法自动更新，请人工检查。")
+            except: pass
+            if rcon: await rcon.close()
 
     async def auto_reset_loop(self):
         await asyncio.sleep(10)
@@ -200,41 +236,17 @@ class SteamModMonitor(Star):
             if self.is_running and self.auto_reset_enable and self.auto_reset_time:
                 try:
                     now = datetime.datetime.now()
-                    current_time_str = now.strftime("%H:%M")
-                    current_date_str = now.strftime("%Y-%m-%d")
-                    
-                    if current_time_str == self.auto_reset_time and self.last_reset_date != current_date_str:
-                        logger.info(f"[Steam模组监控] 触发每日定时任务 ({self.auto_reset_time})")
-                        self.last_reset_date = current_date_str 
+                    if now.strftime("%H:%M") == self.auto_reset_time and self.last_reset_date != now.strftime("%Y-%m-%d"):
+                        logger.info(f"[Steam模组监控] 触发每日定时安检 ({self.auto_reset_time})")
+                        self.last_reset_date = now.strftime("%Y-%m-%d")
                         
                         if self.server_ip and self.server_port:
-                            logger.info(f"[Steam模组监控] 正在执行定时安检 Ping...")
-                            is_online = await self.tcp_ping(self.server_ip, self.server_port)
-                            if not is_online:
-                                err_msg = (
-                                    f"⚠️ 【服务器宕机告警】\n"
-                                    f"自动重置任务已触发，但 AstrBot 无法连通游戏服 ({self.server_ip}:{self.server_port})！\n"
-                                    f"👉 动作：已中止早安播报与红灯重置。\n"
-                                    f"🛠️ 请服主立刻检查 Docker 容器是否卡死或重启报错！"
-                                )
-                                try:
-                                    await self.context.send_message(self.push_group_id, err_msg)
-                                except Exception:
-                                    pass
-                                continue 
-                        
-                        self.pending_updates.clear()
-                        if self.auto_reset_message.strip():
-                            try:
-                                await self.context.send_message(self.push_group_id, self.auto_reset_message)
-                            except Exception as e:
-                                logger.error(f"[Steam模组监控] 发送定时重置播报失败: {repr(e)}")
-                                
-                except asyncio.CancelledError:
-                    break
+                            asyncio.create_task(self.verify_server_health(silent_success=True))
+                        else:
+                            self.pending_updates.clear()
+                            
                 except Exception as e:
-                    logger.error(f"[Steam模组监控] 定时重置任务异常: {repr(e)}")
-                    
+                    logger.error(f"[Steam模组监控] 定时安检异常: {repr(e)}")
             await asyncio.sleep(20)
 
     async def manual_status_check(self, event: AstrMessageEvent):
@@ -250,7 +262,7 @@ class SteamModMonitor(Star):
             async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 async with session.post(url, data=data) as response:
                     if response.status != 200:
-                        yield event.plain_result(f"❌ 查询失败，Steam 接口返回状态码: {response.status}")
+                        yield event.plain_result(f"❌ 查询失败状态码: {response.status}")
                         return
                         
                     result = await response.json()
@@ -263,57 +275,33 @@ class SteamModMonitor(Star):
                         mod_id = str(item.get('publishedfileid', ''))
                         mod_name = item.get('title', '未知模组')
                         current_time = item.get('time_updated', 0)
-                        
-                        if not mod_id:
-                            continue
+                        if not mod_id: continue
                             
-                        if current_time > 0:
-                            time_str = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M')
-                        else:
-                            time_str = "未知时间"
+                        time_str = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M') if current_time > 0 else "未知时间"
                         
                         if mod_id in self.pending_updates:
-                            lines.append(f"🔴 {mod_name} ({mod_id}) | 需更新 (最新版本: {time_str})")
+                            lines.append(f"🔴 {mod_name} ({mod_id}) | 需更新 (最新: {time_str})")
                             needs_update_count += 1
                         else:
                             lines.append(f"🟢 {mod_name} ({mod_id}) | {time_str}")
                     
                     long_text = "【当前服务器模组健康状态明细】\n\n" + "\n".join(lines)
+                    bot_id = str(event.get_self_id()) if hasattr(event, 'get_self_id') else "10000"
                     
-                    try:
-                        bot_id = str(event.get_self_id())
-                    except Exception:
-                        bot_id = "10000" 
-                    
-                    forward_node = Node(
-                        uin=bot_id,
-                        custom_name="Steam模组管家",
-                        content=[Plain(long_text)]
-                    )
-                    
-                    yield event.chain_result([forward_node])
+                    yield event.chain_result([Node(uin=bot_id, custom_name="Steam模组管家", content=[Plain(long_text)])])
                     await asyncio.sleep(0.5)
                     
-                    total = len(self.mod_ids)
-                    summary = (
-                        f"📊 监控状态总结：\n"
-                        f"一共监控了 {total} 个模组\n"
-                        f"需要更新的有 {needs_update_count} 个 ({needs_update_count}/{total})"
-                    )
-                    
-                    if needs_update_count > 0:
-                        summary += "\n\n💡 提示：重启游戏服务器后，请发送 /steammod reset 消除以上红灯报警。"
-                    
+                    summary = f"📊 状态总结：共 {len(self.mod_ids)} 个，需更新 {needs_update_count} 个。"
                     yield event.plain_result(summary)
                     
         except Exception as e:
-            yield event.plain_result(f"❌ 手动查询出现网络异常: {repr(e)}")
+            yield event.plain_result(f"❌ 网络异常: {repr(e)}")
 
     async def monitor_loop(self):
         await asyncio.sleep(5) 
         while True:
             if self.is_running:
-                logger.info(f"[Steam模组监控] 开始向 Steam 获取 {len(self.mod_ids)} 个模组的最新状态...")
+                logger.info(f"[Steam模组监控] 开始后台静默查表...")
                 await self.check_steam_updates_with_retry(is_manual=False)
             await asyncio.sleep(self.poll_interval * 60)
 
@@ -331,8 +319,6 @@ class SteamModMonitor(Star):
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                     async with session.post(url, data=data) as response:
                         if response.status != 200:
-                            if attempt == self.max_retries:
-                                logger.error(f"[Steam模组监控] 接口报错: {response.status}，已放弃。")
                             await asyncio.sleep(5)
                             continue
                         result = await response.json()
@@ -340,14 +326,13 @@ class SteamModMonitor(Star):
                         return 
             except Exception as e:
                 if attempt < self.max_retries:
-                    logger.debug(f"[Steam模组监控] 网络波动重试 {attempt}/{self.max_retries}...")
                     await asyncio.sleep(5) 
                 else:
-                    logger.error(f"[Steam模组监控] ❌ 自动轮询因网络问题最终失败: {repr(e)}")
+                    logger.error(f"[Steam模组监控] ❌ 自动轮询最终失败: {repr(e)}")
 
     async def process_result(self, result, is_manual):
         items = result.get('response', {}).get('publishedfiledetails', [])
-        updated_count = 0
+        new_updates_found = False
         
         for item in items:
             mod_id = str(item.get('publishedfileid', ''))
@@ -362,21 +347,54 @@ class SteamModMonitor(Star):
                 continue
                 
             if current_time > self.last_update_times[mod_id]:
-                logger.info(f"[Steam模组监控] 🚨 发现更新！模组: {mod_name}")
+                logger.info(f"[Steam模组监控] 🚨 发现新版本！模组: {mod_name}")
                 self.last_update_times[mod_id] = current_time
-                self.pending_updates.add(mod_id) 
-                updated_count += 1
-                await self.push_alert(mod_id, mod_name)
+                time_str = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M')
+                self.pending_updates[mod_id] = {"name": mod_name, "time": time_str}
+                new_updates_found = True
                 
         if not is_manual:
-            if updated_count > 0:
-                logger.info(f"[Steam模组监控] 本轮检查完毕，发现 {updated_count} 个更新。")
-            else:
-                logger.info(f"[Steam模组监控] 本轮检查完毕，所有模组均为最新。")
+            if self.pending_updates and not self.is_restarting:
+                await self.handle_auto_restart_logic(new_updates_found)
 
-    async def push_alert(self, mod_id: str, mod_name: str):
-        msg_text = self.push_template.replace("{mod_name}", mod_name).replace("{mod_id}", mod_id)
-        try:
-            await self.context.send_message(self.push_group_id, msg_text)
-        except Exception as e:
-            logger.error(f"[Steam模组监控] 推送失败: {repr(e)}")
+    async def handle_auto_restart_logic(self, new_updates_found):
+        players_count = await self.get_online_players()
+        mod_list_str = "\n".join([f"- {v['name']} ({k}) [{v['time']}]" for k, v in self.pending_updates.items()])
+        
+        if players_count == 0:
+            self.is_restarting = True
+            msg = (
+                f"🔄 【发现模组需更新】\n"
+                f"{mod_list_str}\n\n"
+                f"🕵️ 经 RCON 查验，当前服务器【无玩家在线】。\n"
+                f"🚀 正在静默执行重启升级，预计耗时 {self.server_restart_wait_minutes} 分钟，请稍候..."
+            )
+            try:
+                await self.context.send_message(self.push_group_id, msg)
+            except: pass
+            
+            asyncio.create_task(self.execute_rcon_restart(is_auto=True))
+            
+        elif players_count > 0:
+            if new_updates_found or not self.broadcast_sent_for_current_updates:
+                qq_msg = (
+                    f"⚠️ 【发现模组需更新】\n"
+                    f"{mod_list_str}\n\n"
+                    f"👥 经 RCON 查验，当前服务器有【{players_count} 位玩家】在线。\n"
+                    f"⏳ 已向游戏内发送广播预警。将在下一轮检测（或玩家全部离线后）自动执行重启，请留意后续通知。"
+                )
+                try:
+                    await self.context.send_message(self.push_group_id, qq_msg)
+                except: pass
+                
+                rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
+                try:
+                    await rcon.connect()
+                    clean_broadcast = self.server_rcon_broadcast.replace('"', "'")
+                    await rcon.execute(f'servermsg "{clean_broadcast}"')
+                    await rcon.close()
+                    self.broadcast_sent_for_current_updates = True 
+                    logger.info("[Steam模组监控] 有玩家在线，已推迟重启并发送中文广播。")
+                except Exception as e:
+                    logger.error(f"[Steam模组监控] 延迟重启时发广播失败: {repr(e)}")
+                    if rcon: await rcon.close()
