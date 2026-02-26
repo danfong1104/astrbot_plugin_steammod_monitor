@@ -1,0 +1,8 @@
+name: astrbot_plugin_steammod_monitor
+desc: 用于监控steam的mod状态变更，并在状态变化时推送通知。
+author: danfong1104
+repo: https://github.com/Maoer233/astrbot_plugin_steam_status_monitor
+version: 0.0.1
+tags:
+  - steam
+social_link: https://github.com/Maoer233
