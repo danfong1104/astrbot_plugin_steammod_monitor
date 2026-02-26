@@ -15,6 +15,12 @@
         "hint": "建议设为 30。请求过于频繁会导致 Steam 拒绝响应。",
         "default": 30
     },
+    "max_retries": {
+        "description": "请求失败重试次数",
+        "type": "int",
+        "hint": "因网络波动请求失败时，自动重试的次数。默认 5 次。",
+        "default": 5
+    },
     "steam_api_base": {
         "description": "API 接口地址",
         "type": "string",
