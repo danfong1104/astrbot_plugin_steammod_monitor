@@ -1,0 +1,1 @@
+# astrbot_plugin_pz_mod_monitor
