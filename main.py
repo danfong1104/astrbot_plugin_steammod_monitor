@@ -3,7 +3,10 @@ import aiohttp
 import time
 import json
 import os
-from astrbot.api.all import *
+
+# 【关键修复】明确导入 AstrBot 的专属模块，防止与 Python 默认语法冲突
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
 
 @register("pz_mod_monitor", "YourName", "监控Steam创意工坊模组更新并在群内播报", "1.0.0")
 class PZModMonitor(Star):
@@ -19,7 +22,7 @@ class PZModMonitor(Star):
         
         # 内部状态记录
         self.mod_ids = [m.strip() for m in self.mod_ids_raw.split(",") if m.strip()]
-        self.last_update_times = {} # 记录每个模组最新时间戳: { "3077900375": 1700000000 }
+        self.last_update_times = {} # 记录每个模组最新时间戳
         self.subscribe_groups = set() # 记录哪些群订阅了通知
         
         # 本地持久化文件，用来保存订阅了通知的群
@@ -41,16 +44,17 @@ class PZModMonitor(Star):
             json.dump(list(self.subscribe_groups), f)
 
     @filter.command("开启模组监控")
-    async def subscribe_monitor(self, event: MessageEvent):
+    async def subscribe_monitor(self, event: AstrMessageEvent):
         """群内指令：绑定当前群作为推送目标"""
         session_id = event.message_obj.group_id or event.message_obj.sender_id
         if not session_id:
-            await event.reply("获取群组ID失败，请在群聊中使用该命令。")
+            # 采用最新的 AstrBot 回复标准
+            yield event.plain_result("获取群组ID失败，请在群聊中使用该命令。")
             return
             
-        self.subscribe_groups.add(session_id)
+        self.subscribe_groups.add(str(session_id))
         self._save_subs()
-        await event.reply(f"✅ 当前群已成功绑定！\n监控名单共 {len(self.mod_ids)} 个模组，每 {self.poll_interval} 分钟轮询一次 Steam 状态。")
+        yield event.plain_result(f"✅ 当前群已成功绑定！\n监控名单共 {len(self.mod_ids)} 个模组，每 {self.poll_interval} 分钟轮询一次 Steam 状态。")
 
     async def monitor_loop(self):
         """核心后台轮询循环"""
@@ -110,5 +114,8 @@ class PZModMonitor(Star):
         msg_text = self.push_template.replace("{mod_name}", mod_name).replace("{mod_id}", mod_id)
         
         for group_id in self.subscribe_groups:
-            # 这里调用了 AstrBot 的通用推送接口
-            await self.context.send_message(group_id, msg_text)
+            try:
+                # 尝试通过 context 发送主动消息
+                await self.context.send_message(group_id, msg_text)
+            except Exception as e:
+                self.context.logger.error(f"[PZ模组监控] 推送消息失败: {e}")
