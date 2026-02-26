@@ -67,5 +67,10 @@
         "type": "int",
         "hint": "必须是 TCP 端口。强烈建议填 RCON 端口(默认 27015)，能精确判断是否开服成功。",
         "default": 27015
+    },
+    "server_rcon_password": {
+        "description": "RCON 密码",
+        "type": "string",
+        "hint": "在服务端 .ini 或 Docker 环境变量中设置的 RCON 密码。用于执行群内安全重启指令。"
     }
 }
