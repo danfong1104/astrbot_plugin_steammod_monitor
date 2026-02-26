@@ -6,7 +6,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.3.1")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.4.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -22,7 +22,7 @@ class SteamModMonitor(Star):
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         self.last_update_times = {} 
-        self.pending_updates = set() # 记录自插件启动以来，已经发生更新的模组ID（红灯名单）
+        self.pending_updates = set() 
         self.is_running = bool(self.push_group_id and self.mod_ids)
         
         # 清理旧的僵尸任务
@@ -58,24 +58,21 @@ class SteamModMonitor(Star):
             yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
             
         elif action == "reset":
-            # 重置待更新名单
             self.pending_updates.clear()
             yield event.plain_result("✅ 状态已重置！所有红灯已清除，目前全库显示为最新（绿灯）状态。")
             
         else:
-            # 默认执行：手动查询全库状态
             if not self.mod_ids:
                 yield event.plain_result("❌ 模组列表为空，请先在控制台配置。")
                 return
                 
-            yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的最新状态，请稍候...")
+            yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的状态...")
             
-            # 【关键修复】使用 async for 迭代异步生成器
             async for msg in self.manual_status_check(event):
                 yield msg
 
     async def manual_status_check(self, event: AstrMessageEvent):
-        """手动获取所有模组状态并返回清单"""
+        """手动获取状态，拆分发送以利用 QQ 自动折叠长文本机制"""
         url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         data = {"itemcount": len(self.mod_ids)}
         for i, mod_id in enumerate(self.mod_ids):
@@ -103,32 +100,36 @@ class SteamModMonitor(Star):
                         if not mod_id:
                             continue
                         
-                        # 如果该模组在红灯名单里
                         if mod_id in self.pending_updates:
                             lines.append(f"🔴 {mod_name} ({mod_id}) - 需更新")
                             needs_update_count += 1
                         else:
                             lines.append(f"🟢 {mod_name} ({mod_id})")
                     
-                    # 生成底部总结
+                    # 第一步：只发送超长的明细列表（触发 QQ 自动折叠）
+                    list_msg = "【模组红绿灯明细清单】\n" + "\n".join(lines)
+                    yield event.plain_result(list_msg)
+                    
+                    # 暂停 0.5 秒，确保前一条超长消息先发出去，防止顺序乱掉
+                    await asyncio.sleep(0.5)
+                    
+                    # 第二步：单独发送简短高亮的统计总结
                     total = len(self.mod_ids)
                     summary = (
-                        f"\n━━━━━━━━━━━━━━━━\n"
-                        f"📊 总结：共监控 {total} 个模组，需要更新的有 {needs_update_count} 个 ({needs_update_count}/{total})"
+                        f"📊 监控状态总结：\n"
+                        f"一共监控了 {total} 个模组\n"
+                        f"需要更新的有 {needs_update_count} 个 ({needs_update_count}/{total})"
                     )
                     
                     if needs_update_count > 0:
-                        summary += "\n💡 提示：您重启游戏服务器后，可发送 /steammod reset 来消除红灯报错。"
+                        summary += "\n\n💡 提示：您重启游戏服务器后，请发送 /steammod reset 消除以上红灯报警。"
                     
-                    # 组合最终消息体
-                    msg = "【当前服务器模组健康状态】\n" + "\n".join(lines) + summary
-                    yield event.plain_result(msg)
+                    yield event.plain_result(summary)
                     
         except Exception as e:
             yield event.plain_result(f"❌ 手动查询出现网络异常: {repr(e)}")
 
     async def monitor_loop(self):
-        """核心后台轮询死循环"""
         await asyncio.sleep(5) 
         while True:
             if self.is_running:
@@ -142,7 +143,6 @@ class SteamModMonitor(Star):
             await asyncio.sleep(self.poll_interval * 60)
 
     async def check_steam_updates_with_retry(self):
-        """带重试与代理接管的核心查表函数"""
         url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         data = {"itemcount": len(self.mod_ids)}
         for i, mod_id in enumerate(self.mod_ids):
@@ -172,7 +172,6 @@ class SteamModMonitor(Star):
                     logger.error(f"[Steam模组监控] ❌ 已达最大重试次数！最终报错: {repr(e)}")
 
     async def process_result(self, result):
-        """解析 JSON 并处理报警"""
         items = result.get('response', {}).get('publishedfiledetails', [])
         updated_count = 0
         
@@ -184,16 +183,14 @@ class SteamModMonitor(Star):
             if not mod_id or current_time == 0:
                 continue
                 
-            # 初始化基准时间戳
             if mod_id not in self.last_update_times:
                 self.last_update_times[mod_id] = current_time
                 continue
                 
-            # 对比时间戳，发现更新
             if current_time > self.last_update_times[mod_id]:
                 logger.info(f"[Steam模组监控] 🚨 发现更新！模组: {mod_name}")
                 self.last_update_times[mod_id] = current_time
-                self.pending_updates.add(mod_id) # 加入红灯名单
+                self.pending_updates.add(mod_id) 
                 updated_count += 1
                 await self.push_alert(mod_id, mod_name)
                 
@@ -203,7 +200,6 @@ class SteamModMonitor(Star):
             logger.info(f"[Steam模组监控] 本轮检查完毕，所有模组均为最新。")
 
     async def push_alert(self, mod_id: str, mod_name: str):
-        """群组推送"""
         msg_text = self.push_template.replace("{mod_name}", mod_name).replace("{mod_id}", mod_id)
         try:
             await self.context.send_message(self.push_group_id, msg_text)
