@@ -32,57 +32,63 @@
         "type": "string",
         "hint": "去 Steam 开发者页面申请。填入可大幅降低被限制频率的概率。"
     },
-    "push_template": {
-        "description": "推送文本模板",
-        "type": "string",
-        "hint": "可用变量：{mod_name}，{mod_id}。支持填入 CQ 码（如 @全体成员）。",
-        "default": "🚨 监控预警！\n检测到模组【{mod_name}】(ID:{mod_id}) 发布了更新！\n服主将在不久后重启服务器拉取最新版本。"
-    },
     "auto_reset_enable": {
-        "description": "启用每日定时重置",
+        "description": "启用每日定时安检与重置",
         "type": "bool",
-        "hint": "开启后，将在下方设定的时间自动清除所有红灯报警（配合服务器定时重启功能使用）。",
+        "hint": "开启后，将在下方设定的时间进行静默健康检查，成功则清零红灯，失败则群内报警。",
         "default": false
     },
     "auto_reset_time": {
-        "description": "每日定时重置时间",
+        "description": "每日定时安检时间",
         "type": "string",
-        "hint": "格式如 04:20 (请务必使用 24小时制 + 英文冒号)",
+        "hint": "格式如 04:20 (建议比绿联NAS重启时间晚15-20分钟)",
         "default": "04:20"
-    },
-    "auto_reset_message": {
-        "description": "定时重置播报文本",
-        "type": "string",
-        "hint": "重置成功后发送到群里的早报文本。留空则只重置不发通知。",
-        "default": "🌅 早上好！游戏服务器已完成每日例行重启。当前所有模组警报已消除，大家可以放心进入肯塔基州啦！"
     },
     "server_ip": {
         "description": "服务器 IP/域名",
         "type": "string",
-        "hint": "用于状态探测。AstrBot若与游戏服在同一局域网可填内网IP。留空则关闭探测。",
+        "hint": "用于 RCON 控制和健康探测。必须填写才能使用自动升级功能。",
         "default": ""
     },
     "server_port": {
         "description": "服务器探测/RCON端口",
         "type": "int",
-        "hint": "必须是 TCP 端口。填 RCON 端口(默认 27015)，能精确判断是否开服成功并用于远程控制。",
+        "hint": "必须是 TCP 端口。填 RCON 端口(默认 27015)，能精确判断是否开服成功。",
         "default": 27015
     },
     "server_rcon_password": {
         "description": "RCON 密码",
         "type": "string",
-        "hint": "在服务端 .ini 或 Docker 环境变量中设置的 RCON 密码。用于执行群内安全重启指令。"
+        "hint": "必须填写，用于读取在线玩家人数和执行安全重启指令。"
     },
     "server_rcon_broadcast": {
-        "description": "重启前的全服广播文本",
+        "description": "有更新时(有人在线)的广播",
         "type": "string",
-        "hint": "执行重启指令时，将在游戏内屏幕上发送的警告消息。不支持中文，请使用拼音或英文！",
-        "default": "Warning! Server will RESTART for mod updates in a moment! Please find a safe place!"
+        "hint": "检测到更新且有玩家时发送。仅提醒，不立刻重启。",
+        "default": "查询到模组有更新，不影响您本次游玩，您游戏结束1小时后会自动更新，如需要强制更新，请联系麻花！"
     },
     "server_rcon_countdown": {
-        "description": "广播后重启倒计时(秒)",
+        "description": "自动更新(无玩家)倒计时(秒)",
         "type": "int",
-        "hint": "发送广播后，等待多少秒再执行保存并关机。默认 60 秒。",
+        "hint": "确认为 0 玩家时，执行保存并关机前的缓冲时间。默认 5 秒。",
+        "default": 5
+    },
+    "server_rcon_manual_broadcast": {
+        "description": "人工强制重启的警告广播",
+        "type": "string",
+        "hint": "群主手动发送 /steammod restart 时，在游戏内触发的全局广播。",
+        "default": "服务器将在60秒后强制重启更新模组，请尽快找到安全的地方等待！"
+    },
+    "server_rcon_manual_countdown": {
+        "description": "人工强制重启倒计时(秒)",
+        "type": "int",
+        "hint": "手动强制重启时，发送广播后留给玩家安全下线的逃生时间。默认 60 秒。",
         "default": 60
+    },
+    "server_restart_wait_minutes": {
+        "description": "重启后首次探针延迟(分钟)",
+        "type": "int",
+        "hint": "执行重启后，等待多久再进行首次 Ping 测试。建议根据服务器实际开服速度填写。",
+        "default": 6
     }
 }
