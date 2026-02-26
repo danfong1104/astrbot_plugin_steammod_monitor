@@ -37,5 +37,35 @@
         "type": "string",
         "hint": "可用变量：{mod_name}，{mod_id}。支持填入 CQ 码（如 @全体成员）。",
         "default": "🚨 监控预警！\n检测到模组【{mod_name}】(ID:{mod_id}) 发布了更新！\n服务器将在不久后自动重启拉取最新版本。"
+    },
+    "auto_reset_enable": {
+        "description": "启用每日定时重置",
+        "type": "bool",
+        "hint": "开启后，将在下方设定的时间自动清除所有红灯报警（配合服务器定时重启功能使用）。",
+        "default": false
+    },
+    "auto_reset_time": {
+        "description": "每日定时重置时间",
+        "type": "string",
+        "hint": "格式如 04:20 (请务必使用 24小时制 + 英文冒号)",
+        "default": "04:20"
+    },
+    "auto_reset_message": {
+        "description": "定时重置播报文本",
+        "type": "string",
+        "hint": "重置成功后发送到群里的早报文本。留空则只重置不发通知。",
+        "default": "🌅 早上好！游戏服务器已完成每日例行重启。当前所有模组警报已消除，大家可以放心进入肯塔基州啦！"
+    },
+    "server_ip": {
+        "description": "服务器 IP/域名",
+        "type": "string",
+        "hint": "用于状态探测。AstrBot若与游戏服在同一局域网可填内网IP。留空则关闭探测。",
+        "default": ""
+    },
+    "server_port": {
+        "description": "服务器探测端口",
+        "type": "int",
+        "hint": "必须是 TCP 端口。强烈建议填 RCON 端口(默认 27015)，能精确判断是否开服成功。",
+        "default": 27015
     }
 }
