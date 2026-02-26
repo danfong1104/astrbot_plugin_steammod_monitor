@@ -7,7 +7,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Node, Plain
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.1.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.2.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -109,15 +109,15 @@ class SteamModMonitor(Star):
                     # 1. 构建长文本明细
                     long_text = "【当前服务器模组健康状态明细】\n\n" + "\n".join(lines)
                     
-                    # 2. 获取正确的发送者 QQ 号 (【关键修复点】)
+                    # 2. 获取机器人自身的 QQ 号 (【关键修复点】)
                     try:
-                        sender_id = str(event.get_sender_id())
+                        bot_id = str(event.get_self_id())
                     except Exception:
-                        sender_id = "10000" # 兜底防错
+                        bot_id = "10000" # 兜底防错
                     
                     # 3. 包装成一个“合并转发”节点 (Node)
                     forward_node = Node(
-                        uin=sender_id,
+                        uin=bot_id,
                         custom_name="Steam模组管家",
                         content=[Plain(long_text)]
                     )
