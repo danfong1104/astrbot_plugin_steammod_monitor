@@ -1,95 +1,94 @@
 import asyncio
 import aiohttp
-import time
 import json
-import os
-
-# 【关键修复】明确导入 AstrBot 的专属模块，防止与 Python 默认语法冲突
+import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
-@register("pz_mod_monitor", "YourName", "监控Steam创意工坊模组更新并在群内播报", "1.0.0")
+@register("pz_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.0.0")
 class PZModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
-        # 从后台配置界面读取数据
+        # 读取 Web 后台配置
+        self.push_group_id = self.config.get("push_group_id", "").strip()
         self.mod_ids_raw = self.config.get("mod_ids", "")
         self.poll_interval = self.config.get("poll_interval_minutes", 30)
+        self.steam_api_base = self.config.get("steam_api_base", "https://api.steampowered.com").rstrip('/')
         self.steam_api_key = self.config.get("steam_api_key", "")
         self.push_template = self.config.get("push_template", "🚨 模组【{mod_name}】已更新！")
         
-        # 内部状态记录
-        self.mod_ids = [m.strip() for m in self.mod_ids_raw.split(",") if m.strip()]
-        self.last_update_times = {} # 记录每个模组最新时间戳
-        self.subscribe_groups = set() # 记录哪些群订阅了通知
+        # 利用正则表达式，同时兼容分号(;)和逗号(,)作为分隔符
+        self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
+        self.last_update_times = {} 
         
-        # 本地持久化文件，用来保存订阅了通知的群
-        self.data_file = "data/pz_monitor_subs.json"
-        self._load_subs()
+        # 控制轮询开关。只要填了群号，默认开机自动运行
+        self.is_running = bool(self.push_group_id and self.mod_ids)
+        
+        if self.is_running:
+            self.context.logger.info(f"[PZ模组监控] 插件已启动！目标群:{self.push_group_id}，共载入 {len(self.mod_ids)} 个模组。")
+        else:
+            self.context.logger.warning("[PZ模组监控] 启动挂起：未配置推送群号或模组列表为空。")
 
-        # 启动后台轮询任务
+        # 挂载后台异步轮询任务
         self.monitor_task = asyncio.create_task(self.monitor_loop())
 
-    def _load_subs(self):
-        """加载订阅群组数据"""
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r", encoding="utf-8") as f:
-                self.subscribe_groups = set(json.load(f))
-
-    def _save_subs(self):
-        """保存订阅群组数据"""
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(list(self.subscribe_groups), f)
-
-    @filter.command("开启模组监控")
-    async def subscribe_monitor(self, event: AstrMessageEvent):
-        """群内指令：绑定当前群作为推送目标"""
-        session_id = event.message_obj.group_id or event.message_obj.sender_id
-        if not session_id:
-            # 采用最新的 AstrBot 回复标准
-            yield event.plain_result("获取群组ID失败，请在群聊中使用该命令。")
+    @filter.command("steammod on")
+    async def start_monitor(self, event: AstrMessageEvent):
+        """群内手动开启指令"""
+        if not self.push_group_id:
+            yield event.plain_result("❌ 启动失败：请先在后台配置页面设置好 [推送目标 QQ 群号]！")
             return
             
-        self.subscribe_groups.add(str(session_id))
-        self._save_subs()
-        yield event.plain_result(f"✅ 当前群已成功绑定！\n监控名单共 {len(self.mod_ids)} 个模组，每 {self.poll_interval} 分钟轮询一次 Steam 状态。")
+        self.is_running = True
+        self.context.logger.info("[PZ模组监控] 管理员手动开启了轮询。")
+        yield event.plain_result(f"✅ 监控已开启！正在对 {len(self.mod_ids)} 个模组进行高强度巡视。")
+        # 开启后立即执行一次检查
+        await self.check_steam_updates()
+
+    @filter.command("steammod off")
+    async def stop_monitor(self, event: AstrMessageEvent):
+        """群内手动关闭指令"""
+        self.is_running = False
+        self.context.logger.info("[PZ模组监控] 管理员手动暂停了轮询。")
+        yield event.plain_result("🛑 监控已暂停！后台轮询已停止。")
 
     async def monitor_loop(self):
-        """核心后台轮询循环"""
-        await asyncio.sleep(10) # 延迟启动，等机器人完全初始化
+        """核心后台轮询死循环"""
+        await asyncio.sleep(5) # 等待框架初始化
         
         while True:
-            if self.mod_ids and self.subscribe_groups:
+            if self.is_running:
+                self.context.logger.info(f"[PZ模组监控] 开始向 Steam 获取 {len(self.mod_ids)} 个模组的最新状态...")
                 try:
                     await self.check_steam_updates()
                 except Exception as e:
-                    self.context.logger.error(f"[PZ模组监控] 轮询出错: {e}")
+                    self.context.logger.error(f"[PZ模组监控] 网络请求异常: {e}")
             
-            # 等待设定的轮询周期（分钟转换为秒）
+            # 等待设定的轮询周期
             await asyncio.sleep(self.poll_interval * 60)
 
     async def check_steam_updates(self):
-        """向 Steam API 发送请求并对比时间戳"""
-        url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+        """核心查表函数"""
+        url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         data = {"itemcount": len(self.mod_ids)}
         for i, mod_id in enumerate(self.mod_ids):
             data[f"publishedfileids[{i}]"] = mod_id
             
-        # 优先使用 API Key 可以防止被限流
         if self.steam_api_key:
             data["key"] = self.steam_api_key
 
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=data) as response:
                 if response.status != 200:
-                    self.context.logger.error(f"[PZ模组监控] Steam API 响应错误: {response.status}")
+                    self.context.logger.error(f"[PZ模组监控] Steam 接口返回失败代码: {response.status}")
                     return
                     
                 result = await response.json()
                 items = result.get('response', {}).get('publishedfiledetails', [])
                 
+                updated_count = 0
                 for item in items:
                     mod_id = str(item.get('publishedfileid', ''))
                     mod_name = item.get('title', '未知模组')
@@ -98,24 +97,25 @@ class PZModMonitor(Star):
                     if not mod_id or current_time == 0:
                         continue
                         
-                    # 第一次抓取，只记录时间戳，不推送
+                    # 首次抓取，只建档记录，不报警
                     if mod_id not in self.last_update_times:
                         self.last_update_times[mod_id] = current_time
                         continue
                         
-                    # 发现时间戳变大，说明更新了！
+                    # 对比时间戳，发现更新
                     if current_time > self.last_update_times[mod_id]:
+                        self.context.logger.info(f"[PZ模组监控] 🚨 发现更新！模组: {mod_name}")
                         self.last_update_times[mod_id] = current_time
+                        updated_count += 1
                         await self.push_alert(mod_id, mod_name)
+                        
+                self.context.logger.info(f"[PZ模组监控] 本轮检查完毕，共发现 {updated_count} 个模组有更新。")
 
     async def push_alert(self, mod_id: str, mod_name: str):
-        """向所有订阅的群组发送告警文本"""
-        # 替换配置界面里的占位符
+        """推送到指定的 QQ 群"""
         msg_text = self.push_template.replace("{mod_name}", mod_name).replace("{mod_id}", mod_id)
-        
-        for group_id in self.subscribe_groups:
-            try:
-                # 尝试通过 context 发送主动消息
-                await self.context.send_message(group_id, msg_text)
-            except Exception as e:
-                self.context.logger.error(f"[PZ模组监控] 推送消息失败: {e}")
+        try:
+            # 兼容老版本与新版本的发送逻辑
+            await self.context.send_message(self.push_group_id, msg_text)
+        except Exception as e:
+            self.context.logger.error(f"[PZ模组监控] 消息推送到群 {self.push_group_id} 失败: {e}")
