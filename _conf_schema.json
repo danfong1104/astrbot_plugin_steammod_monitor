@@ -1,38 +1,35 @@
 {
     "push_group_id": {
-        "title": "推送群号",
-        "description": "接收更新通知的 QQ 群号。填好后插件启动即自动轮询。",
+        "description": "推送群号",
         "type": "string",
-        "default": ""
+        "hint": "接收更新通知的 QQ 群号。填好后插件启动即自动开始轮询。"
     },
     "mod_ids": {
-        "title": "模组 ID 列表",
-        "description": "纯数字 ID，用逗号(,)或分号(;)隔开。支持直接从服务端 .ini 复制粘贴。",
+        "description": "模组 ID 列表",
         "type": "string",
-        "default": "3077900375"
+        "hint": "纯数字 ID，用逗号(,)或分号(;)隔开。支持直接从服务端 .ini 复制粘贴。"
     },
     "poll_interval_minutes": {
-        "title": "轮询间隔 (分钟)",
-        "description": "建议设为 30。请求过于频繁会导致 Steam 拒绝响应。",
+        "description": "轮询间隔 (分钟)",
         "type": "int",
+        "hint": "建议设为 30。请求过于频繁会导致 Steam 拒绝响应。",
         "default": 30
     },
     "steam_api_base": {
-        "title": "API 接口地址",
-        "description": "Steam Web API 地址。如服务器在国内连不上，可改为反代地址。",
+        "description": "API 接口地址",
         "type": "string",
+        "hint": "Steam Web API 地址。如服务器在国内连不上，可改为反代地址。",
         "default": "https://api.steampowered.com"
     },
     "steam_api_key": {
-        "title": "API Key (可选)",
-        "description": "去 Steam 开发者页面申请。填入可大幅降低被限制频率的概率。",
+        "description": "API Key (可选)",
         "type": "string",
-        "default": ""
+        "hint": "去 Steam 开发者页面申请。填入可大幅降低被限制频率的概率。"
     },
     "push_template": {
-        "title": "推送文本模板",
-        "description": "可用变量：{mod_name}，{mod_id}。支持填入 CQ 码（如 @全体成员）。",
+        "description": "推送文本模板",
         "type": "string",
+        "hint": "可用变量：{mod_name}，{mod_id}。支持填入 CQ 码（如 @全体成员）。",
         "default": "🚨 监控预警！\n检测到模组【{mod_name}】(ID:{mod_id}) 发布了更新！\n服务器将在不久后自动重启拉取最新版本。"
     }
 }
