@@ -5,8 +5,10 @@ import re
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+# 【新增】引入合并转发节点和纯文本组件
+from astrbot.api.message_components import Node, Plain
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.4.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "3.0.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -66,13 +68,12 @@ class SteamModMonitor(Star):
                 yield event.plain_result("❌ 模组列表为空，请先在控制台配置。")
                 return
                 
-            yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的状态...")
-            
+            yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的最新状态，请稍候...")
             async for msg in self.manual_status_check(event):
                 yield msg
 
     async def manual_status_check(self, event: AstrMessageEvent):
-        """手动获取状态，拆分发送以利用 QQ 自动折叠长文本机制"""
+        """手动获取状态，并使用【合并转发】发送明细"""
         url = f"{self.steam_api_base}/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         data = {"itemcount": len(self.mod_ids)}
         for i, mod_id in enumerate(self.mod_ids):
@@ -106,14 +107,24 @@ class SteamModMonitor(Star):
                         else:
                             lines.append(f"🟢 {mod_name} ({mod_id})")
                     
-                    # 第一步：只发送超长的明细列表（触发 QQ 自动折叠）
-                    list_msg = "【模组红绿灯明细清单】\n" + "\n".join(lines)
-                    yield event.plain_result(list_msg)
+                    # 1. 构建长文本明细
+                    long_text = "【当前服务器模组健康状态明细】\n\n" + "\n".join(lines)
                     
-                    # 暂停 0.5 秒，确保前一条超长消息先发出去，防止顺序乱掉
+                    # 2. 包装成一个“合并转发”节点 (Node)
+                    # 使用发送者的 QQ 号作为头像，显得更自然
+                    forward_node = Node(
+                        uin=event.message_obj.sender_id,
+                        custom_name="Steam模组管家",
+                        content=[Plain(long_text)]
+                    )
+                    
+                    # 发送合并转发卡片
+                    yield event.chain_result([forward_node])
+                    
+                    # 停顿 0.5 秒，防止消息顺序错乱
                     await asyncio.sleep(0.5)
                     
-                    # 第二步：单独发送简短高亮的统计总结
+                    # 3. 单独发送统计总结
                     total = len(self.mod_ids)
                     summary = (
                         f"📊 监控状态总结：\n"
@@ -122,7 +133,7 @@ class SteamModMonitor(Star):
                     )
                     
                     if needs_update_count > 0:
-                        summary += "\n\n💡 提示：您重启游戏服务器后，请发送 /steammod reset 消除以上红灯报警。"
+                        summary += "\n\n💡 提示：重启游戏服务器后，请发送 /steammod reset 消除以上红灯报警。"
                     
                     yield event.plain_result(summary)
                     
