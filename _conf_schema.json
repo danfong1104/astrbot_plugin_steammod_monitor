@@ -36,7 +36,7 @@
         "description": "推送文本模板",
         "type": "string",
         "hint": "可用变量：{mod_name}，{mod_id}。支持填入 CQ 码（如 @全体成员）。",
-        "default": "🚨 监控预警！\n检测到模组【{mod_name}】(ID:{mod_id}) 发布了更新！\n服务器将在不久后自动重启拉取最新版本。"
+        "default": "🚨 监控预警！\n检测到模组【{mod_name}】(ID:{mod_id}) 发布了更新！\n服主将在不久后重启服务器拉取最新版本。"
     },
     "auto_reset_enable": {
         "description": "启用每日定时重置",
@@ -63,14 +63,26 @@
         "default": ""
     },
     "server_port": {
-        "description": "服务器探测端口",
+        "description": "服务器探测/RCON端口",
         "type": "int",
-        "hint": "必须是 TCP 端口。强烈建议填 RCON 端口(默认 27015)，能精确判断是否开服成功。",
+        "hint": "必须是 TCP 端口。填 RCON 端口(默认 27015)，能精确判断是否开服成功并用于远程控制。",
         "default": 27015
     },
     "server_rcon_password": {
         "description": "RCON 密码",
         "type": "string",
         "hint": "在服务端 .ini 或 Docker 环境变量中设置的 RCON 密码。用于执行群内安全重启指令。"
+    },
+    "server_rcon_broadcast": {
+        "description": "重启前的全服广播文本",
+        "type": "string",
+        "hint": "执行重启指令时，将在游戏内屏幕上发送的警告消息。不支持中文，请使用拼音或英文！",
+        "default": "Warning! Server will RESTART for mod updates in a moment! Please find a safe place!"
+    },
+    "server_rcon_countdown": {
+        "description": "广播后重启倒计时(秒)",
+        "type": "int",
+        "hint": "发送广播后，等待多少秒再执行保存并关机。默认 60 秒。",
+        "default": 60
     }
 }
