@@ -53,7 +53,7 @@ class AsyncRCON:
             self.writer.close()
             await self.writer.wait_closed()
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与零玩家侦测插件", "5.2.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与零玩家侦测插件", "5.2.1")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -80,7 +80,6 @@ class SteamModMonitor(Star):
         self.server_rcon_manual_broadcast = self.config.get("server_rcon_manual_broadcast", "服务器将在60秒后强制重启更新模组，请尽快找到安全的地方等待！")
         self.server_rcon_manual_countdown = self.config.get("server_rcon_manual_countdown", 60)
         
-        # 新增：重启后首次健康检测等待时间（分钟转秒）
         self.server_restart_wait_minutes = self.config.get("server_restart_wait_minutes", 6)
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
@@ -95,7 +94,7 @@ class SteamModMonitor(Star):
                 task.cancel()
 
         if self.is_running:
-            logger.info(f"[Steam模组监控] 插件 v5.2.0 启动完毕！探针延迟设为 {self.server_restart_wait_minutes} 分钟。")
+            logger.info(f"[Steam模组监控] 插件 v5.2.1 启动完毕！探针延迟设为 {self.server_restart_wait_minutes} 分钟。")
             
         self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steam_mod_monitor_loop_task")
         self.reset_task = asyncio.create_task(self.auto_reset_loop(), name="steam_mod_monitor_reset_task")
@@ -128,6 +127,7 @@ class SteamModMonitor(Star):
             return -1
 
     async def verify_server_health(self, silent_success=False):
+        """核心探针：负责验证重启结果并发送群通知"""
         wait_seconds = self.server_restart_wait_minutes * 60
         logger.info(f"[Steam模组监控] 进入健康度等待周期，预计 {wait_seconds} 秒 ({self.server_restart_wait_minutes}分钟) 后进行初次探针测试...")
         await asyncio.sleep(wait_seconds) 
@@ -152,9 +152,11 @@ class SteamModMonitor(Star):
                 )
                 try:
                     await self.context.send_message(self.push_group_id, success_msg)
-                except: pass
+                    logger.info("[Steam模组监控] ✅ 重启成功播报已成功推送到 QQ 群！")
+                except Exception as e:
+                    logger.error(f"[Steam模组监控] ❌ 推送成功播报到群内失败，请检查框架网络或账号风控: {repr(e)}")
         else:
-            logger.error("[Steam模组监控] ❌ 严重错误：经过 3 分钟重试，服务器依然离线！")
+            logger.error("[Steam模组监控] ❌ 严重错误：经过延时重试，服务器依然离线！")
             self.is_restarting = False
             fail_msg = (
                 f"❌ 【服务器宕机严重告警】\n"
@@ -164,7 +166,9 @@ class SteamModMonitor(Star):
             )
             try:
                 await self.context.send_message(self.push_group_id, fail_msg)
-            except: pass
+                logger.info("[Steam模组监控] 宕机告警已推送到群内。")
+            except Exception as e:
+                logger.error(f"[Steam模组监控] ❌ 推送宕机告警失败: {repr(e)}")
 
     @filter.command("steammod")
     async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
@@ -227,7 +231,8 @@ class SteamModMonitor(Star):
             self.is_restarting = False
             try:
                 await self.context.send_message(self.push_group_id, f"❌ RCON 触发重启失败：{repr(e)}。无法自动更新，请人工检查。")
-            except: pass
+            except Exception as ex: 
+                logger.error(f"[Steam模组监控] ❌ 推送 RCON 失败通知到群内异常: {repr(ex)}")
             if rcon: await rcon.close()
 
     async def auto_reset_loop(self):
@@ -371,7 +376,8 @@ class SteamModMonitor(Star):
             )
             try:
                 await self.context.send_message(self.push_group_id, msg)
-            except: pass
+            except Exception as e:
+                logger.error(f"[Steam模组监控] ❌ 推送0玩家更新通知失败: {repr(e)}")
             
             asyncio.create_task(self.execute_rcon_restart(is_auto=True))
             
@@ -385,7 +391,8 @@ class SteamModMonitor(Star):
                 )
                 try:
                     await self.context.send_message(self.push_group_id, qq_msg)
-                except: pass
+                except Exception as e:
+                    logger.error(f"[Steam模组监控] ❌ 推送有玩家延时更新通知失败: {repr(e)}")
                 
                 rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
                 try:
