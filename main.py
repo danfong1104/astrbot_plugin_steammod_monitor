@@ -6,7 +6,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.3.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控插件", "2.3.1")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -69,7 +69,10 @@ class SteamModMonitor(Star):
                 return
                 
             yield event.plain_result(f"🔍 正在向 Steam 校验 {len(self.mod_ids)} 个模组的最新状态，请稍候...")
-            await self.manual_status_check(event)
+            
+            # 【关键修复】使用 async for 迭代异步生成器
+            async for msg in self.manual_status_check(event):
+                yield msg
 
     async def manual_status_check(self, event: AstrMessageEvent):
         """手动获取所有模组状态并返回清单"""
