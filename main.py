@@ -53,7 +53,7 @@ class AsyncRCON:
             self.writer.close()
             await self.writer.wait_closed()
 
-@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与零玩家侦测插件", "5.3.0")
+@register("steam_mod_monitor", "YourName", "全自动 Steam 模组监控与零玩家侦测插件", "5.3.1")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -98,7 +98,7 @@ class SteamModMonitor(Star):
                 task.cancel()
 
         if self.is_running:
-            logger.info(f"[Steam模组监控] 插件 v5.3.0 启动完毕！探针延迟设为 {self.server_restart_wait_minutes} 分钟。")
+            logger.info(f"[Steam模组监控] 插件 v5.3.1 启动完毕！探针延迟设为 {self.server_restart_wait_minutes} 分钟。")
             
         self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steam_mod_monitor_loop_task")
         self.reset_task = asyncio.create_task(self.auto_reset_loop(), name="steam_mod_monitor_reset_task")
@@ -175,7 +175,7 @@ class SteamModMonitor(Star):
             if not silent_success:
                 success_msg = (
                     f"✅ 【服务器已重启成功】\n"
-                    f"Ping 连通性检测正常！最新模组已加载完毕，红灯预警已自动消除。\n"
+                    f"服务器连通性检测正常！最新模组已加载完毕，MOD模组状态信息已经更新。\n"
                     f"🎮 大家可以进入游戏游玩啦！"
                 )
                 await self.send_alert(success_msg)
@@ -391,7 +391,7 @@ class SteamModMonitor(Star):
         if players_count == 0:
             self.is_restarting = True
             msg = (
-                f"🔄 【发现模组需更新】\n"
+                f"🔄 【检测到steam订阅模组更新】\n"
                 f"{mod_list_str}\n\n"
                 f"🕵️ 经 RCON 查验，当前服务器【无玩家在线】。\n"
                 f"🚀 正在静默执行重启升级，预计耗时 {self.server_restart_wait_minutes} 分钟，请稍候..."
@@ -403,7 +403,7 @@ class SteamModMonitor(Star):
         elif players_count > 0:
             if new_updates_found or not self.broadcast_sent_for_current_updates:
                 qq_msg = (
-                    f"⚠️ 【发现模组需更新】\n"
+                    f"⚠️ 【检测到steam订阅模组更新】\n"
                     f"{mod_list_str}\n\n"
                     f"👥 经 RCON 查验，当前服务器有【{players_count} 位玩家】在线。\n"
                     f"⏳ 已向游戏内发送广播预警。将在下一轮检测（或玩家全部离线后）自动执行重启，请留意后续通知。"
