@@ -27,6 +27,9 @@
 - 📡 **跨次元 RCON 联动**：支持跨次元下发全服中文广播，在执行强制重启前给予玩家安全下线倒计时。
 - ⏰ **宿主机时钟同步清零**：支持设定每日定时静默安检（配合宿主机底层 Cron 定时重启使用），每日清晨自动抹平旧账簿。
 
+<img width="555" height="813" alt="image" src="https://github.com/user-attachments/assets/3fd2a202-a238-4005-9788-32a90563b5a8" />
+<img width="496" height="402" alt="image" src="https://github.com/user-attachments/assets/c66a91f2-b7db-4503-92f2-762bc796489f" />
+
 ---
 
 ## 💻 交互指令字典
