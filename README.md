@@ -1,4 +1,4 @@
-# 🎮 AstrBot Steam 创意工坊模组管家 (Steam Workshop Manager)
+# 🎮 AstrBot Steam 创意工坊模组管家 (astrbot_plugin_steammod_monitor)
 
 > 无论你是只想追踪心仪 Mod 更新的**普通玩家**，还是管理着百人游戏服的**硬核服主**，这都是为你量身定制的终极模组监控解决方案。
 > 从基础的“更新订阅推送”，到进阶的“零玩家侦测与全自动安全重启”，一键掌控你的 Steam 创意工坊生态。
