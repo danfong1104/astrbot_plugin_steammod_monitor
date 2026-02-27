@@ -7,23 +7,23 @@ import datetime
 import struct
 from pathlib import Path
 
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
+from astrbot.api.event.filter import EventMessageType, event_message_type
+from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Node, Plain
 from astrbot.api.star import StarTools
 
-# --- 常量定义 (避免散落的魔法值) ---
+# --- 常量定义 ---
 RCON_TIMEOUT = 5.0
-HEALTH_CHECK_RETRY_INTERVAL = 180  # 探针重试间隔 (秒)
-SAVE_DELAY = 5                     # 关机前的存档缓冲 (秒)
-API_TIMEOUT_TOTAL = 45             # API 超时总时长 (秒)
-API_TIMEOUT_CONN = 15              # API 连接超时 (秒)
-RETRY_DELAY = 5                    # 网络请求重试间隔 (秒)
-
+HEALTH_CHECK_RETRY_INTERVAL = 180  
+SAVE_DELAY = 5                     
+API_TIMEOUT_TOTAL = 45             
+API_TIMEOUT_CONN = 15              
+RETRY_DELAY = 5                    
 
 class AsyncRCON:
-    """轻量级纯异步 Source RCON 客户端 (修正版)"""
+    """轻量级纯异步 Source RCON 客户端"""
     def __init__(self, host: str, port: int, password: str):
         self.host = host
         self.port = port
@@ -41,22 +41,20 @@ class AsyncRCON:
             asyncio.open_connection(self.host, self.port), timeout=RCON_TIMEOUT
         )
         auth_id = self._next_packet_id()
-        await self._send(3, self.password, auth_id)  # SERVERDATA_AUTH = 3
+        await self._send(3, self.password, auth_id) 
         
-        # 持续读取直到捕获认证结果，防止读到其他残余包
         while True:
             resp = await self._read()
             if resp.get('id') == -1:
                 raise ValueError("RCON 认证失败：密码错误或被拒绝")
-            if resp.get('type') == 2 and resp.get('id') == auth_id:  # SERVERDATA_AUTH_RESPONSE = 2
+            if resp.get('type') == 2 and resp.get('id') == auth_id: 
                 break
 
     async def execute(self, command: str) -> str:
         req_id = self._next_packet_id()
-        await self._send(2, command, req_id)  # SERVERDATA_EXECCOMMAND = 2
+        await self._send(2, command, req_id) 
         
         response_text = ""
-        # 读取响应直到匹配 req_id。PZ 的简短指令通常只回一包，这里作了包 ID 校验防乱序
         try:
             while True:
                 resp = await asyncio.wait_for(self._read(), timeout=RCON_TIMEOUT)
@@ -64,7 +62,7 @@ class AsyncRCON:
                     response_text += resp.get('body', '')
                     break  
         except asyncio.TimeoutError:
-            pass  # 达到超时视作响应读取完毕
+            pass 
             
         return response_text
 
@@ -92,17 +90,17 @@ class AsyncRCON:
                 pass
 
 
+@register("steam_mod_monitor", "YourName", "Steam 创意工坊管家与游戏服 RCON 控制核心", "5.6.0")
 class SteamModMonitor(Star):
-    """
-    全自动 Steam 模组监控与零玩家侦测插件
-    优化点：强类型转换、数据持久化、协程锁保护、原生生命周期接管
-    """
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.state_lock = asyncio.Lock()  # 状态读写保护锁
+        self.state_lock = asyncio.Lock()  
         
-        # --- 1. 参数严谨解析与下限防御 ---
+        self.global_bot = None
+        self.SEND_TIMEOUT = 15.0
+        
+        # --- 参数严谨解析 ---
         self.push_group_id = str(self.config.get("push_group_id", "")).strip()
         self.mod_ids_raw = str(self.config.get("mod_ids", ""))
         self.poll_interval = max(1, int(self.config.get("poll_interval_minutes", 30)))
@@ -127,33 +125,31 @@ class SteamModMonitor(Star):
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         
-        # --- 2. 内存状态与持久化配置 ---
+        # --- 内存状态与持久化配置 ---
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_steammod_monitor")
         self.data_file = Path(self.data_dir) / "data.json"
         
         self.last_update_times = {} 
         self.pending_updates = {} 
         self.last_reset_date = None
-        self._load_data_sync()  # 启动时同步加载数据
+        self._load_data_sync()  
         
         self.is_running = bool(self.push_group_id and self.mod_ids)
         self.is_restarting = False 
         self.broadcast_sent_for_current_updates = False 
         
-        # --- 3. 任务声明 ---
+        # 任务声明
         self.monitor_task = None
         self.reset_task = None
         if self.is_running:
-            logger.info(f"[Steam模组监控] 插件启动完毕，配置完成。探针延迟: {self.server_restart_wait_minutes}m")
+            logger.info(f"[Steam模组监控] 插件启动！配置目标群号: {self.push_group_id}")
             self.monitor_task = asyncio.create_task(self.monitor_loop(), name="steammod_monitor")
             self.reset_task = asyncio.create_task(self.auto_reset_loop(), name="steammod_reset")
 
     def _load_data_sync(self):
-        """同步读取持久化数据"""
         if not self.data_file.parent.exists():
             self.data_file.parent.mkdir(parents=True, exist_ok=True)
             return
-            
         if self.data_file.exists():
             try:
                 with open(self.data_file, 'r', encoding='utf-8') as f:
@@ -162,10 +158,9 @@ class SteamModMonitor(Star):
                     self.pending_updates = data.get("pending_updates", {})
                     self.last_reset_date = data.get("last_reset_date", None)
             except Exception as e:
-                logger.error(f"[Steam模组监控] 状态加载失败, 采用全新状态: {e}")
+                logger.error(f"[Steam模组监控] 状态加载失败: {e}")
 
     async def _save_data(self):
-        """异步写入持久化数据"""
         data = {
             "last_update_times": self.last_update_times,
             "pending_updates": self.pending_updates,
@@ -177,31 +172,52 @@ class SteamModMonitor(Star):
                     json.dump(data, f, ensure_ascii=False)
             await asyncio.to_thread(_write)
         except Exception as e:
-            logger.error(f"[Steam模组监控] 状态落盘失败: {e}")
+            pass
 
     async def terminate(self):
-        """原生生命周期接管，避免暴力 kill 全局 task"""
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
         if self.reset_task and not self.reset_task.done():
             self.reset_task.cancel()
         await self._save_data()
-        logger.info("[Steam模组监控] 任务已优雅终止并完成数据落盘。")
+        logger.info("[Steam模组监控] 任务已终止并落盘。")
+
+    @event_message_type(EventMessageType.ALL)
+    async def silent_capture(self, event: AstrMessageEvent):
+        """核心魔法：后台静默抓取 Bot 实例。只要有人发消息，瞬间拿到发送权限！"""
+        if not self.global_bot:
+            self.global_bot = event.bot
+            logger.info("[Steam模组监控] 🚀 嗅探到活动，底层通讯通道已打通，支持纯QQ群号直推！")
 
     async def send_alert(self, msg: str):
-        """不再依赖 global_bot，使用官方 Context 标准三段式路由"""
+        """智能路由引擎：纯数字走原生 API，复杂字符串走官方路由"""
         if not self.push_group_id:
             return
             
-        target_session = self.push_group_id
-        if "~" not in target_session:
-            target_session = f"aiocqhttp~group~{target_session}"
-            
+        # 1. 纯数字QQ号 -> 走 Native API (最爽的体验，直接成功)
+        if self.push_group_id.isdigit() and self.global_bot:
+            try:
+                group_id_int = int(self.push_group_id)
+                await asyncio.wait_for(
+                    self.global_bot.api.call_action(
+                        "send_group_msg", 
+                        group_id=group_id_int, 
+                        message=str(msg)
+                    ),
+                    timeout=self.SEND_TIMEOUT
+                )
+                logger.info(f"[Steam模组监控] ✅ 消息原生推送到群: {group_id_int}")
+                return
+            except Exception as e:
+                logger.error(f"[Steam模组监控] ❌ 原生 API 推送失败: {repr(e)}")
+
+        # 2. 如果不是纯数字（比如有人填了完整的 UMO），或者 global_bot 还没嗅探到，走官方兜底
         try:
-            await self.context.send_message(target_session, msg)
-            logger.info(f"[Steam模组监控] ✅ 消息成功推送到: {target_session}")
-        except Exception as e:
-            logger.error(f"[Steam模组监控] ❌ 推送失败 [{target_session}]: {type(e).__name__} - {str(e)}")
+            chain = MessageChain().message(msg)
+            await self.context.send_message(self.push_group_id, chain)
+            logger.info(f"[Steam模组监控] ✅ 消息通过官方路由推送到: {self.push_group_id}")
+        except Exception as ex:
+            logger.error(f"[Steam模组监控] ❌ 官方路由也失败了: {repr(ex)}")
 
     async def tcp_ping(self, host: str, port: int, timeout: int = 3) -> bool:
         try:
@@ -215,7 +231,6 @@ class SteamModMonitor(Star):
             return False
 
     async def get_online_players(self) -> int:
-        """获取玩家数，异常必须返回 -1，供上游做失败保护"""
         if not self.server_ip or not self.server_port or not self.server_rcon_password:
             return -1
             
@@ -229,11 +244,9 @@ class SteamModMonitor(Star):
                 return int(match.group(1))
             return 0 
         except Exception as e:
-            logger.error(f"[Steam模组监控] 获取玩家人数失败: {type(e).__name__}")
             return -1
 
     async def verify_server_health(self, silent_success=False):
-        """终极探针"""
         wait_seconds = self.server_restart_wait_minutes * 60
         logger.info(f"[Steam模组监控] 进入健康等待 ({self.server_restart_wait_minutes}分钟)...")
         await asyncio.sleep(wait_seconds) 
@@ -271,6 +284,10 @@ class SteamModMonitor(Star):
 
     @filter.command("steammod")
     async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
+        # 手动发送指令，也可以起到主动激活通讯通道的作用
+        if not self.global_bot:
+            self.global_bot = event.bot
+
         action = action.strip().lower()
         
         if action == "on":
@@ -304,7 +321,6 @@ class SteamModMonitor(Star):
                 yield event.plain_result("❌ RCON 配置不全。")
                 return
             
-            # 【防并发锁】去重机制
             async with self.state_lock:
                 if self.is_restarting:
                     yield event.plain_result("⚠️ 警告：当前已在重启流程中，请勿重复触发！")
@@ -471,7 +487,6 @@ class SteamModMonitor(Star):
                     new_updates_found = True
                     state_changed = True
 
-            # 只要产生了变更就落盘
             if state_changed:
                 await self._save_data()
                 
@@ -483,7 +498,6 @@ class SteamModMonitor(Star):
     async def handle_auto_restart_logic(self, new_updates_found: bool):
         players_count = await self.get_online_players()
         
-        # 兜底：RCON 查询失败（-1），只抛错，拒绝执行危险重启动作
         if players_count == -1:
             logger.error("[Steam模组监控] 获取玩家人数异常，已取消本次自动处理保护服务器。")
             return
@@ -505,7 +519,6 @@ class SteamModMonitor(Star):
             asyncio.create_task(self.execute_rcon_restart(is_auto=True))
             
         elif players_count > 0:
-            # 只在增量出现时推送，避免轮询重复发
             if new_updates_found or not self.broadcast_sent_for_current_updates:
                 qq_msg = (
                     f"⚠️ 【检测到steam订阅模组更新】\n"
