@@ -41,7 +41,7 @@
     "auto_reset_time": {
         "description": "每日定时安检时间",
         "type": "string",
-        "hint": "格式如 04:20 (建议比绿联NAS重启时间晚15-20分钟)",
+        "hint": "格式如 04:20 (建议比NAS重启时间晚15-20分钟)",
         "default": "04:20"
     },
     "server_ip": {
@@ -90,5 +90,34 @@
         "type": "int",
         "hint": "执行重启后，等待多久再进行首次 Ping 测试。建议根据服务器实际开服速度填写。",
         "default": 6
+    },
+    "restart_method": {
+        "description": "重启/更新执行方式",
+        "type": "string",
+        "hint": "选 rcon (旧版断电) 或 linuxgsm (调用Ubuntu原生重启升级指令)。",
+        "default": "rcon"
+    },
+    "ssh_host": {
+        "description": "SSH 主机 IP",
+        "type": "string",
+        "hint": "填入 Ubuntu 虚拟机的 IP (仅 linuxgsm 模式需填写)",
+        "default": "192.168.31.49"
+    },
+    "ssh_port": {
+        "description": "SSH 端口",
+        "type": "int",
+        "hint": "默认 22 (仅 linuxgsm 模式需填写)",
+        "default": 22
+    },
+    "ssh_user": {
+        "description": "SSH 用户名",
+        "type": "string",
+        "hint": "默认 steam (仅 linuxgsm 模式需填写)",
+        "default": "steam"
+    },
+    "ssh_password": {
+        "description": "SSH 密码",
+        "type": "string",
+        "hint": "steam 用户的登录密码 (仅 linuxgsm 模式需填写)"
     }
 }
