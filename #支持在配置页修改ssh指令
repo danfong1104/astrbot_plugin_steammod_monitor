@@ -119,5 +119,23 @@
         "description": "SSH 密码",
         "type": "string",
         "hint": "steam 用户的登录密码 (仅 linuxgsm 模式需填写)"
+    },
+    "cmd_rcon_save": {
+        "description": "自定义 RCON 保存指令",
+        "type": "string",
+        "hint": "执行关机前发送的保存指令。PZ默认: save",
+        "default": "save"
+    },
+    "cmd_rcon_quit": {
+        "description": "自定义 RCON 关机指令",
+        "type": "string",
+        "hint": "断电模式下使用的关机指令。PZ默认: quit",
+        "default": "quit"
+    },
+    "cmd_ssh_restart": {
+        "description": "自定义 SSH 重启指令",
+        "type": "string",
+        "hint": "LinuxGSM模式下执行的完整重启指令。",
+        "default": "cd /home/steam && ./pzserver restart"
     }
 }
