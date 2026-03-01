@@ -7,6 +7,13 @@ import datetime
 import struct
 from pathlib import Path
 
+# 新增：尝试导入异步 SSH 库，为 LinuxGSM 模式提供底层支持
+try:
+    import asyncssh
+    HAS_ASYNCSSH = True
+except ImportError:
+    HAS_ASYNCSSH = False
+
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.event.filter import EventMessageType, event_message_type
 from astrbot.api.star import Context, Star, register
@@ -123,6 +130,13 @@ class SteamModMonitor(Star):
         
         self.server_restart_wait_minutes = max(1, int(self.config.get("server_restart_wait_minutes", 6)))
         
+        # 新增：双模执行配置
+        self.restart_method = str(self.config.get("restart_method", "rcon")).strip().lower()
+        self.ssh_host = str(self.config.get("ssh_host", "")).strip()
+        self.ssh_port = int(self.config.get("ssh_port", 22))
+        self.ssh_user = str(self.config.get("ssh_user", "steam")).strip()
+        self.ssh_password = str(self.config.get("ssh_password", "")).strip()
+        
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         
         # --- 内存状态与持久化配置 ---
@@ -184,26 +198,18 @@ class SteamModMonitor(Star):
 
     @event_message_type(EventMessageType.ALL)
     async def silent_capture(self, event: AstrMessageEvent):
-        """核心魔法：后台静默抓取 Bot 实例。只要有人发消息，瞬间拿到发送权限！"""
         if not self.global_bot:
             self.global_bot = event.bot
             logger.info("[Steam模组监控] 🚀 嗅探到活动，底层通讯通道已打通，支持纯QQ群号直推！")
 
     async def send_alert(self, msg: str):
-        """智能路由引擎：纯数字走原生 API，复杂字符串走官方路由"""
         if not self.push_group_id:
             return
-            
-        # 1. 纯数字QQ号 -> 走 Native API (最爽的体验，直接成功)
         if self.push_group_id.isdigit() and self.global_bot:
             try:
                 group_id_int = int(self.push_group_id)
                 await asyncio.wait_for(
-                    self.global_bot.api.call_action(
-                        "send_group_msg", 
-                        group_id=group_id_int, 
-                        message=str(msg)
-                    ),
+                    self.global_bot.api.call_action("send_group_msg", group_id=group_id_int, message=str(msg)),
                     timeout=self.SEND_TIMEOUT
                 )
                 logger.info(f"[Steam模组监控] ✅ 消息原生推送到群: {group_id_int}")
@@ -211,7 +217,6 @@ class SteamModMonitor(Star):
             except Exception as e:
                 logger.error(f"[Steam模组监控] ❌ 原生 API 推送失败: {repr(e)}")
 
-        # 2. 如果不是纯数字（比如有人填了完整的 UMO），或者 global_bot 还没嗅探到，走官方兜底
         try:
             chain = MessageChain().message(msg)
             await self.context.send_message(self.push_group_id, chain)
@@ -233,7 +238,6 @@ class SteamModMonitor(Star):
     async def get_online_players(self) -> int:
         if not self.server_ip or not self.server_port or not self.server_rcon_password:
             return -1
-            
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
             await rcon.connect()
@@ -278,13 +282,12 @@ class SteamModMonitor(Star):
             fail_msg = (
                 f"❌ 【服务器宕机严重告警】\n"
                 f"重启后未能正常恢复开服！TCP 端口被拒绝。\n"
-                f"🛠️ 请立刻检查 Docker 容器或服务端崩溃日志！"
+                f"🛠️ 请立刻检查容器或服务端崩溃日志！"
             )
             await self.send_alert(fail_msg)
 
     @filter.command("steammod")
     async def handle_steammod(self, event: AstrMessageEvent, action: str = ""):
-        # 手动发送指令，也可以起到主动激活通讯通道的作用
         if not self.global_bot:
             self.global_bot = event.bot
 
@@ -327,7 +330,7 @@ class SteamModMonitor(Star):
                     return
                 self.is_restarting = True
                 
-            yield event.plain_result(f"⚡ 收到手动指令！已下发【{self.server_rcon_manual_countdown}秒】广播...")
+            yield event.plain_result(f"⚡ 收到指令！模式：[{self.restart_method}]。已下发【{self.server_rcon_manual_countdown}秒】广播...")
             asyncio.create_task(self.execute_rcon_restart(is_auto=False))
             
         else:
@@ -335,7 +338,15 @@ class SteamModMonitor(Star):
             async for msg in self.manual_status_check(event):
                 yield msg
 
+    # ================= 分发引擎 =================
     async def execute_rcon_restart(self, is_auto=True):
+        if self.restart_method == "linuxgsm":
+            await self._execute_linuxgsm_restart(is_auto)
+        else:
+            await self._execute_native_rcon_restart(is_auto)
+
+    # 方案 A：纯血 RCON 断电模式 (适用于 Docker 旧服)
+    async def _execute_native_rcon_restart(self, is_auto):
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
             await rcon.connect()
@@ -360,6 +371,49 @@ class SteamModMonitor(Star):
                 self.is_restarting = False
             await self.send_alert(f"❌ RCON 触发失败，请人工检查。报错: {type(e).__name__}")
             if rcon: await rcon.close()
+
+    # 方案 B：LinuxGSM SSH 拉起模式 (适用于 Ubuntu 新服)
+    async def _execute_linuxgsm_restart(self, is_auto):
+        if not HAS_ASYNCSSH:
+            msg = "❌ 缺少 asyncssh 库，无法使用 LinuxGSM 模式。\n请进入 AstrBot 终端执行 pip install asyncssh"
+            logger.error(f"[Steam模组监控] {msg}")
+            await self.send_alert(msg)
+            async with self.state_lock: self.is_restarting = False
+            return
+
+        # 1. 依然通过 RCON 发送友好的中文预警广播
+        rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
+        try:
+            await rcon.connect()
+            if not is_auto:
+                clean_msg = self.server_rcon_manual_broadcast.replace('"', "'")
+                await rcon.execute(f'servermsg "{clean_msg}"')
+                await asyncio.sleep(self.server_rcon_manual_countdown)
+            else:
+                await asyncio.sleep(self.server_rcon_countdown)
+            await rcon.close()
+        except Exception as e:
+            logger.warning(f"[Steam模组监控] 预警广播失败，直接执行 SSH 强制重启: {e}")
+            if rcon: await rcon.close()
+
+        # 2. 召唤 SSH 黑客执行重启指令
+        logger.info("[Steam模组监控] 正在通过 SSH 调用 LinuxGSM restart 指令...")
+        try:
+            async with asyncssh.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_user, password=self.ssh_password, known_hosts=None) as conn:
+                # 触发后不卡死主线程，让它自己在后台跑完“关机 -> 校验更新 -> 开机”全流程
+                result = await conn.run('cd /home/steam && ./pzserver restart', check=False)
+                
+                if result.exit_status != 0:
+                    logger.error(f"[Steam模组监控] LinuxGSM 重启返回错误: {result.stderr}")
+                    await self.send_alert(f"❌ LinuxGSM 指令执行抛出警告（但可能已生效）！\n报错信息: {result.stderr}")
+                
+                logger.info("[Steam模组监控] LinuxGSM restart 指令执行完毕，移交探针等待开机。")
+                asyncio.create_task(self.verify_server_health(silent_success=False))
+                
+        except Exception as e:
+             logger.error(f"[Steam模组监控] SSH 连接或执行失败: {e}")
+             await self.send_alert(f"❌ SSH 调用 LinuxGSM 失败: {e}")
+             async with self.state_lock: self.is_restarting = False
 
     async def auto_reset_loop(self):
         await asyncio.sleep(10)
