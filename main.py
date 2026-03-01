@@ -7,7 +7,7 @@ import datetime
 import struct
 from pathlib import Path
 
-# 新增：尝试导入异步 SSH 库，为 LinuxGSM 模式提供底层支持
+# 尝试导入异步 SSH 库，为 LinuxGSM 模式提供底层支持
 try:
     import asyncssh
     HAS_ASYNCSSH = True
@@ -130,12 +130,17 @@ class SteamModMonitor(Star):
         
         self.server_restart_wait_minutes = max(1, int(self.config.get("server_restart_wait_minutes", 6)))
         
-        # 新增：双模执行配置
+        # 双模执行配置
         self.restart_method = str(self.config.get("restart_method", "rcon")).strip().lower()
         self.ssh_host = str(self.config.get("ssh_host", "")).strip()
         self.ssh_port = int(self.config.get("ssh_port", 22))
         self.ssh_user = str(self.config.get("ssh_user", "steam")).strip()
         self.ssh_password = str(self.config.get("ssh_password", "")).strip()
+
+        # 自定义指令注入点
+        self.cmd_rcon_save = str(self.config.get("cmd_rcon_save", "save")).strip()
+        self.cmd_rcon_quit = str(self.config.get("cmd_rcon_quit", "quit")).strip()
+        self.cmd_ssh_restart = str(self.config.get("cmd_ssh_restart", "cd /home/steam && ./pzserver restart")).strip()
         
         self.mod_ids = [m.strip() for m in re.split(r'[,;]', self.mod_ids_raw) if m.strip()]
         
@@ -345,7 +350,7 @@ class SteamModMonitor(Star):
         else:
             await self._execute_native_rcon_restart(is_auto)
 
-    # 方案 A：纯血 RCON 断电模式 (适用于 Docker 旧服)
+    # 方案 A：纯血 RCON 断电模式
     async def _execute_native_rcon_restart(self, is_auto):
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
@@ -357,12 +362,16 @@ class SteamModMonitor(Star):
                 await rcon.execute(f'servermsg "{clean_msg}"')
                 await asyncio.sleep(self.server_rcon_manual_countdown)
                 
-            await rcon.execute("save")
-            await asyncio.sleep(SAVE_DELAY) 
-            await rcon.execute("quit")
+            # 使用自定义配置的保存和退出指令
+            if self.cmd_rcon_save:
+                await rcon.execute(self.cmd_rcon_save)
+                await asyncio.sleep(SAVE_DELAY) 
+            if self.cmd_rcon_quit:
+                await rcon.execute(self.cmd_rcon_quit)
+                
             await rcon.close()
             
-            logger.info("[Steam模组监控] Quit 关机已下达，移交探针。")
+            logger.info(f"[Steam模组监控] {self.cmd_rcon_quit} 指令已下达，移交探针。")
             asyncio.create_task(self.verify_server_health(silent_success=False))
             
         except Exception as e:
@@ -372,7 +381,7 @@ class SteamModMonitor(Star):
             await self.send_alert(f"❌ RCON 触发失败，请人工检查。报错: {type(e).__name__}")
             if rcon: await rcon.close()
 
-    # 方案 B：LinuxGSM SSH 拉起模式 (适用于 Ubuntu 新服)
+    # 方案 B：LinuxGSM SSH 拉起模式
     async def _execute_linuxgsm_restart(self, is_auto):
         if not HAS_ASYNCSSH:
             msg = "❌ 缺少 asyncssh 库，无法使用 LinuxGSM 模式。\n请进入 AstrBot 终端执行 pip install asyncssh"
@@ -381,7 +390,6 @@ class SteamModMonitor(Star):
             async with self.state_lock: self.is_restarting = False
             return
 
-        # 1. 依然通过 RCON 发送友好的中文预警广播
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
             await rcon.connect()
@@ -396,23 +404,22 @@ class SteamModMonitor(Star):
             logger.warning(f"[Steam模组监控] 预警广播失败，直接执行 SSH 强制重启: {e}")
             if rcon: await rcon.close()
 
-        # 2. 召唤 SSH 黑客执行重启指令
-        logger.info("[Steam模组监控] 正在通过 SSH 调用 LinuxGSM restart 指令...")
+        logger.info(f"[Steam模组监控] 正在通过 SSH 调用指令: {self.cmd_ssh_restart}")
         try:
             async with asyncssh.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_user, password=self.ssh_password, known_hosts=None) as conn:
-                # 触发后不卡死主线程，让它自己在后台跑完“关机 -> 校验更新 -> 开机”全流程
-                result = await conn.run('cd /home/steam && ./pzserver restart', check=False)
+                # 动态使用配置里的 SSH 指令
+                result = await conn.run(self.cmd_ssh_restart, check=False)
                 
                 if result.exit_status != 0:
-                    logger.error(f"[Steam模组监控] LinuxGSM 重启返回错误: {result.stderr}")
-                    await self.send_alert(f"❌ LinuxGSM 指令执行抛出警告（但可能已生效）！\n报错信息: {result.stderr}")
+                    logger.error(f"[Steam模组监控] SSH 指令返回错误: {result.stderr}")
+                    await self.send_alert(f"❌ SSH 指令执行抛出警告（但可能已生效）！\n报错信息: {result.stderr}")
                 
-                logger.info("[Steam模组监控] LinuxGSM restart 指令执行完毕，移交探针等待开机。")
+                logger.info("[Steam模组监控] SSH 指令执行完毕，移交探针等待开机。")
                 asyncio.create_task(self.verify_server_health(silent_success=False))
                 
         except Exception as e:
              logger.error(f"[Steam模组监控] SSH 连接或执行失败: {e}")
-             await self.send_alert(f"❌ SSH 调用 LinuxGSM 失败: {e}")
+             await self.send_alert(f"❌ SSH 调用失败: {e}")
              async with self.state_lock: self.is_restarting = False
 
     async def auto_reset_loop(self):
