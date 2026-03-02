@@ -407,12 +407,14 @@ class SteamModMonitor(Star):
         logger.info(f"[Steam模组监控] 正在通过 SSH 调用指令: {self.cmd_ssh_restart}")
         try:
             async with asyncssh.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_user, password=self.ssh_password, known_hosts=None) as conn:
-                # 动态使用配置里的 SSH 指令
-                result = await conn.run(self.cmd_ssh_restart, check=False)
+                # 动态使用配置里的 SSH 指令，加上 term_type='xterm' 分配虚拟终端
+                result = await conn.run(self.cmd_ssh_restart, check=False, term_type='xterm')
                 
                 if result.exit_status != 0:
-                    logger.error(f"[Steam模组监控] SSH 指令返回错误: {result.stderr}")
-                    await self.send_alert(f"❌ SSH 指令执行抛出警告（但可能已生效）！\n报错信息: {result.stderr}")
+                    stdout_str = str(result.stdout) if result.stdout else "无输出"
+                    stderr_str = str(result.stderr) if result.stderr else "无报错信息"
+                    logger.error(f"[Steam模组监控] SSH 指令返回错误! STDOUT: {stdout_str} | STDERR: {stderr_str}")
+                    await self.send_alert(f"❌ SSH 指令执行异常！\n详细输出: {stdout_str[:200]}\n报错: {stderr_str[:200]}")
                 
                 logger.info("[Steam模组监控] SSH 指令执行完毕，移交探针等待开机。")
                 asyncio.create_task(self.verify_server_health(silent_success=False))
