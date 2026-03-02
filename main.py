@@ -97,7 +97,7 @@ class AsyncRCON:
                 pass
 
 
-@register("steam_mod_monitor", "YourName", "Steam 创意工坊管家与游戏服 RCON 控制核心", "5.6.0")
+@register("steam_mod_monitor", "YourName", "Steam 创意工坊管家与游戏服 RCON 控制核心", "5.7.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -205,7 +205,6 @@ class SteamModMonitor(Star):
     async def silent_capture(self, event: AstrMessageEvent):
         if not self.global_bot:
             self.global_bot = event.bot
-            logger.info("[Steam模组监控] 🚀 嗅探到活动，底层通讯通道已打通，支持纯QQ群号直推！")
 
     async def send_alert(self, msg: str):
         if not self.push_group_id:
@@ -217,17 +216,15 @@ class SteamModMonitor(Star):
                     self.global_bot.api.call_action("send_group_msg", group_id=group_id_int, message=str(msg)),
                     timeout=self.SEND_TIMEOUT
                 )
-                logger.info(f"[Steam模组监控] ✅ 消息原生推送到群: {group_id_int}")
                 return
             except Exception as e:
-                logger.error(f"[Steam模组监控] ❌ 原生 API 推送失败: {repr(e)}")
+                pass
 
         try:
             chain = MessageChain().message(msg)
             await self.context.send_message(self.push_group_id, chain)
-            logger.info(f"[Steam模组监控] ✅ 消息通过官方路由推送到: {self.push_group_id}")
         except Exception as ex:
-            logger.error(f"[Steam模组监控] ❌ 官方路由也失败了: {repr(ex)}")
+            pass
 
     async def tcp_ping(self, host: str, port: int, timeout: int = 3) -> bool:
         try:
@@ -240,29 +237,39 @@ class SteamModMonitor(Star):
         except Exception:
             return False
 
-    async def get_online_players(self) -> int:
+    async def get_online_players_details(self) -> tuple[int, list]:
+        """获取在线玩家人数和名单详情"""
         if not self.server_ip or not self.server_port or not self.server_rcon_password:
-            return -1
+            return -1, []
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
         try:
             await rcon.connect()
             resp = await rcon.execute("players")
             await rcon.close()
+            
+            lines = resp.split('\n')
+            players = []
+            for line in lines:
+                line = line.strip()
+                if line.startswith('- '):
+                    players.append(line[2:].strip())
+                    
             match = re.search(r'Players connected \((\d+)\)', resp)
-            if match:
-                return int(match.group(1))
-            return 0 
+            count = int(match.group(1)) if match else len(players)
+            return count, players
         except Exception as e:
-            return -1
+            return -1, []
+
+    async def get_online_players(self) -> int:
+        count, _ = await self.get_online_players_details()
+        return count
 
     async def verify_server_health(self, silent_success=False):
         wait_seconds = self.server_restart_wait_minutes * 60
-        logger.info(f"[Steam模组监控] 进入健康等待 ({self.server_restart_wait_minutes}分钟)...")
         await asyncio.sleep(wait_seconds) 
         
         is_online = await self.tcp_ping(self.server_ip, self.server_port)
         if not is_online:
-            logger.warning(f"[Steam模组监控] ⚠️ 初次 Ping 失败！等待 {HEALTH_CHECK_RETRY_INTERVAL} 秒重试...")
             await asyncio.sleep(HEALTH_CHECK_RETRY_INTERVAL) 
             is_online = await self.tcp_ping(self.server_ip, self.server_port)
             
@@ -274,16 +281,14 @@ class SteamModMonitor(Star):
                 await self._save_data()
 
         if is_online:
-            logger.info("[Steam模组监控] ✅ 探针测试通过！")
             if not silent_success:
                 success_msg = (
                     f"✅ 【服务器已重启成功】\n"
-                    f"服务器连通性检测正常！最新模组已加载完毕，MOD模组状态信息已经更新。\n"
+                    f"服务器连通性检测正常！最新模组已加载完毕。\n"
                     f"🎮 大家可以进入游戏游玩啦！"
                 )
                 await self.send_alert(success_msg)
         else:
-            logger.error("[Steam模组监控] ❌ 重试后服务器依然离线！")
             fail_msg = (
                 f"❌ 【服务器宕机严重告警】\n"
                 f"重启后未能正常恢复开服！TCP 端口被拒绝。\n"
@@ -338,10 +343,112 @@ class SteamModMonitor(Star):
             yield event.plain_result(f"⚡ 收到指令！模式：[{self.restart_method}]。已下发【{self.server_rcon_manual_countdown}秒】广播...")
             asyncio.create_task(self.execute_rcon_restart(is_auto=False))
             
+        elif action == "check":
+            yield event.plain_result("🔍 正在为您生成【服务器全景运行体检报告】，由于需要抓取底层物理数据，请稍候约5秒...")
+            async for msg in self.generate_check_report(event):
+                yield msg
+            
         else:
             yield event.plain_result(f"🔍 核对 {len(self.mod_ids)} 个模组最后更新时间，请稍候...")
             async for msg in self.manual_status_check(event):
                 yield msg
+
+    async def generate_check_report(self, event: AstrMessageEvent):
+        """生成精美的全景体检报告"""
+        
+        # 1. 抓取游戏服务端数据 (RCON & Ping)
+        is_online = await self.tcp_ping(self.server_ip, self.server_port) if self.server_ip else False
+        p_count, p_list = await self.get_online_players_details()
+        
+        game_status = "✅ 运行中 (端口通畅)" if is_online else "❌ 离线 / 端口被拒"
+        player_info = f"{p_count} 人" if p_count >= 0 else "未知 (RCON未连接)"
+        player_names = ", ".join(p_list) if p_list else ("当前无幸存者在线" if p_count == 0 else "无法获取名单")
+        
+        # 2. 抓取宿主机底层数据 (SSH)
+        ssh_status = "❌ 配置不全或连接失败"
+        uptime_str, cpu_str, ram_str, disk_str = "未知", "未知", "未知", "未知"
+        backup_status_str = "❌ 探测失败"
+        
+        if HAS_ASYNCSSH and self.ssh_host:
+            # 极其精简巧妙的组合探测命令
+            probe_cmd = """
+            echo "---SYS---"
+            uptime -p
+            top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}'
+            free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }'
+            df -h /home/steam | awk 'NR==2{print $4 " 可用 / " $2 " 总量 (" $5 " 已用)"}'
+            echo "---BAK---"
+            stat -c "%y|%s|%n" $(ls -t /home/steam/pz_core_backup_*.tar.gz 2>/dev/null | head -n 1) 2>/dev/null || echo "NOT_FOUND"
+            """
+            try:
+                async with asyncssh.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_user, password=self.ssh_password, known_hosts=None) as conn:
+                    result = await conn.run(probe_cmd, check=False)
+                    if result.exit_status == 0:
+                        ssh_status = "✅ 连接正常"
+                        out = result.stdout.strip()
+                        if "---SYS---" in out and "---BAK---" in out:
+                            parts = out.split("---BAK---")
+                            sys_lines = [line.strip() for line in parts[0].split("---SYS---")[1].strip().split('\n') if line.strip()]
+                            bak_line = parts[1].strip()
+                            
+                            if len(sys_lines) >= 4:
+                                uptime_str = sys_lines[0]
+                                cpu_str = sys_lines[1] + "%"
+                                ram_str = sys_lines[2]
+                                disk_str = sys_lines[3]
+                                
+                            if bak_line == "NOT_FOUND":
+                                backup_status_str = "⚠️ 未找到任何备份文件"
+                            else:
+                                # 解析：2026-03-02 05:00:00.000000000 +0800|154012|/home/steam/...tar.gz
+                                bak_parts = bak_line.split('|')
+                                if len(bak_parts) >= 3:
+                                    date_str = bak_parts[0].split('.')[0] # 截取掉毫秒
+                                    size_mb = round(int(bak_parts[1]) / (1024 * 1024), 2)
+                                    file_name = bak_parts[2].split('/')[-1]
+                                    
+                                    # 检查是否是今天生成的
+                                    now_date = datetime.datetime.now().strftime("%Y-%m-%d")
+                                    is_today = now_date in date_str
+                                    
+                                    icon = "✅ 备份任务正常！" if is_today else "⚠️ 警告：最新备份不是今日生成的！"
+                                    backup_status_str = f"{icon}\n🕒 最新创建：{date_str}\n📦 档案大小：{size_mb} MB\n📁 档案名称：{file_name}"
+
+            except Exception as e:
+                ssh_status = f"❌ SSH连接异常 ({type(e).__name__})"
+
+        # 3. 抓取管家插件数据
+        mod_status = f"🔴 有 {len(self.pending_updates)} 个模组等待更新！" if self.pending_updates else "🟢 所有模组均是最新版本"
+        auto_check = f"已开启 (每日 {self.auto_reset_time})" if self.auto_reset_enable else "已关闭"
+
+        # 4. 组装终极报告
+        report = (
+            "📊【服务器全景运行体检报告】\n"
+            "==========================\n"
+            "🖥️ 宿主机 (Ubuntu) 物理状态\n"
+            f"🔌 SSH状态：{ssh_status}\n"
+            f"⏱️ 运行时间：{uptime_str}\n"
+            f"🧠 CPU 负载：{cpu_str}\n"
+            f"💽 内存占用：{ram_str}\n"
+            f"💾 磁盘空间：{disk_str}\n\n"
+            
+            "💾 核心数据备份状态\n"
+            f"{backup_status_str}\n\n"
+            
+            "🧟 游戏服务端 (Project Zomboid)\n"
+            f"🎮 进程状态：{game_status}\n"
+            f"👥 在线人数：{player_info}\n"
+            f"📋 玩家列表：{player_names}\n\n"
+            
+            "🛠️ Steam 模组管家状态\n"
+            f"👁️ 巡视目标：{len(self.mod_ids)} 个模组\n"
+            f"🚨 更新预警：{mod_status}\n"
+            f"⏰ 定时安检：{auto_check}\n"
+            "=========================="
+        )
+        
+        bot_id = str(event.get_self_id()) if hasattr(event, 'get_self_id') else "10000"
+        yield event.chain_result([Node(uin=bot_id, custom_name="Steam管家中控面板", content=[Plain(report)])])
 
     # ================= 分发引擎 =================
     async def execute_rcon_restart(self, is_auto=True):
@@ -362,7 +469,6 @@ class SteamModMonitor(Star):
                 await rcon.execute(f'servermsg "{clean_msg}"')
                 await asyncio.sleep(self.server_rcon_manual_countdown)
                 
-            # 使用自定义配置的保存和退出指令
             if self.cmd_rcon_save:
                 await rcon.execute(self.cmd_rcon_save)
                 await asyncio.sleep(SAVE_DELAY) 
@@ -370,12 +476,9 @@ class SteamModMonitor(Star):
                 await rcon.execute(self.cmd_rcon_quit)
                 
             await rcon.close()
-            
-            logger.info(f"[Steam模组监控] {self.cmd_rcon_quit} 指令已下达，移交探针。")
             asyncio.create_task(self.verify_server_health(silent_success=False))
             
         except Exception as e:
-            logger.error(f"[Steam模组监控] RCON 重启失败: {type(e).__name__} - {str(e)}")
             async with self.state_lock:
                 self.is_restarting = False
             await self.send_alert(f"❌ RCON 触发失败，请人工检查。报错: {type(e).__name__}")
@@ -385,7 +488,6 @@ class SteamModMonitor(Star):
     async def _execute_linuxgsm_restart(self, is_auto):
         if not HAS_ASYNCSSH:
             msg = "❌ 缺少 asyncssh 库，无法使用 LinuxGSM 模式。\n请进入 AstrBot 终端执行 pip install asyncssh"
-            logger.error(f"[Steam模组监控] {msg}")
             await self.send_alert(msg)
             async with self.state_lock: self.is_restarting = False
             return
@@ -401,26 +503,20 @@ class SteamModMonitor(Star):
                 await asyncio.sleep(self.server_rcon_countdown)
             await rcon.close()
         except Exception as e:
-            logger.warning(f"[Steam模组监控] 预警广播失败，直接执行 SSH 强制重启: {e}")
             if rcon: await rcon.close()
 
-        logger.info(f"[Steam模组监控] 正在通过 SSH 调用指令: {self.cmd_ssh_restart}")
         try:
             async with asyncssh.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_user, password=self.ssh_password, known_hosts=None) as conn:
-                # 动态使用配置里的 SSH 指令，加上 term_type='xterm' 分配虚拟终端
                 result = await conn.run(self.cmd_ssh_restart, check=False, term_type='xterm')
                 
                 if result.exit_status != 0:
                     stdout_str = str(result.stdout) if result.stdout else "无输出"
                     stderr_str = str(result.stderr) if result.stderr else "无报错信息"
-                    logger.error(f"[Steam模组监控] SSH 指令返回错误! STDOUT: {stdout_str} | STDERR: {stderr_str}")
                     await self.send_alert(f"❌ SSH 指令执行异常！\n详细输出: {stdout_str[:200]}\n报错: {stderr_str[:200]}")
                 
-                logger.info("[Steam模组监控] SSH 指令执行完毕，移交探针等待开机。")
                 asyncio.create_task(self.verify_server_health(silent_success=False))
                 
         except Exception as e:
-             logger.error(f"[Steam模组监控] SSH 连接或执行失败: {e}")
              await self.send_alert(f"❌ SSH 调用失败: {e}")
              async with self.state_lock: self.is_restarting = False
 
@@ -441,7 +537,7 @@ class SteamModMonitor(Star):
                                 self.pending_updates.clear()
                                 await self._save_data()
                 except Exception as e:
-                    logger.error(f"[Steam模组监控] 定时安检异常: {str(e)}")
+                    pass
             await asyncio.sleep(20)
 
     async def manual_status_check(self, event: AstrMessageEvent):
@@ -521,7 +617,7 @@ class SteamModMonitor(Star):
                 if attempt < self.max_retries:
                     await asyncio.sleep(RETRY_DELAY) 
                 else:
-                    logger.error(f"[Steam模组监控] 自动轮询最终失败: {type(e).__name__}")
+                    pass
 
     async def process_result(self, result, is_manual):
         items = result.get('response', {}).get('publishedfiledetails', [])
@@ -543,7 +639,6 @@ class SteamModMonitor(Star):
                     continue
                     
                 if current_time > self.last_update_times[mod_id]:
-                    logger.info(f"[Steam模组监控] 🚨 发现新版本！模组: {mod_name}")
                     self.last_update_times[mod_id] = current_time
                     time_str = datetime.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M')
                     self.pending_updates[mod_id] = {"name": mod_name, "time": time_str}
@@ -562,7 +657,6 @@ class SteamModMonitor(Star):
         players_count = await self.get_online_players()
         
         if players_count == -1:
-            logger.error("[Steam模组监控] 获取玩家人数异常，已取消本次自动处理保护服务器。")
             return
             
         async with self.state_lock:
@@ -601,5 +695,4 @@ class SteamModMonitor(Star):
                         self.broadcast_sent_for_current_updates = True 
                         await self._save_data()
                 except Exception as e:
-                    logger.error(f"[Steam模组监控] 延迟发广播失败: {str(e)}")
                     if rcon: await rcon.close()
