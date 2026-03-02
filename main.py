@@ -97,7 +97,7 @@ class AsyncRCON:
                 pass
 
 
-@register("steam_mod_monitor", "YourName", "Steam 创意工坊管家与游戏服 RCON 控制核心", "5.7.0")
+@register("steam_mod_monitor", "YourName", "Steam 创意工坊管家与游戏服 RCON 控制核心", "5.8.0")
 class SteamModMonitor(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -238,7 +238,7 @@ class SteamModMonitor(Star):
             return False
 
     async def get_online_players_details(self) -> tuple[int, list]:
-        """获取在线玩家人数和名单详情"""
+        """获取在线玩家人数和名单详情（修复名单解析兼容性）"""
         if not self.server_ip or not self.server_port or not self.server_rcon_password:
             return -1, []
         rcon = AsyncRCON(self.server_ip, self.server_port, self.server_rcon_password)
@@ -251,8 +251,11 @@ class SteamModMonitor(Star):
             players = []
             for line in lines:
                 line = line.strip()
-                if line.startswith('- '):
-                    players.append(line[2:].strip())
+                # 兼容 "-admin" 和 "- admin" 的各种排版情况
+                if line.startswith('-'):
+                    p_name = line[1:].strip()
+                    if p_name:
+                        players.append(p_name)
                     
             match = re.search(r'Players connected \((\d+)\)', resp)
             count = int(match.group(1)) if match else len(players)
@@ -354,7 +357,7 @@ class SteamModMonitor(Star):
                 yield msg
 
     async def generate_check_report(self, event: AstrMessageEvent):
-        """生成精美的全景体检报告"""
+        """生成精美的全景体检报告 (完美规避中英文语言环境差异)"""
         
         # 1. 抓取游戏服务端数据 (RCON & Ping)
         is_online = await self.tcp_ping(self.server_ip, self.server_port) if self.server_ip else False
@@ -366,17 +369,17 @@ class SteamModMonitor(Star):
         
         # 2. 抓取宿主机底层数据 (SSH)
         ssh_status = "❌ 配置不全或连接失败"
-        uptime_str, cpu_str, ram_str, disk_str = "未知", "未知", "未知", "未知"
+        uptime_str, cpu_str, ram_str, disk_str = "获取失败", "获取失败", "获取失败", "获取失败"
         backup_status_str = "❌ 探测失败"
         
         if HAS_ASYNCSSH and self.ssh_host:
-            # 极其精简巧妙的组合探测命令
+            # 使用无视语言包(Locale)的极简键值对探测法
             probe_cmd = """
             echo "---SYS---"
-            uptime -p
-            top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}'
-            free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2 }'
-            df -h /home/steam | awk 'NR==2{print $4 " 可用 / " $2 " 总量 (" $5 " 已用)"}'
+            echo "UPTIME|$(uptime -p 2>/dev/null || uptime)"
+            echo "LOAD|$(cat /proc/loadavg | awk '{print $1}')"
+            echo "RAM|$(free -m | awk 'NR==2{printf "%s/%s MB (%.1f%%)", $3,$2,$3*100/$2}')"
+            echo "DISK|$(df -hP /home/steam | awk 'NR==2{print $4 " 可用 / " $2 " 总量 (" $5 " 已用)"}')"
             echo "---BAK---"
             stat -c "%y|%s|%n" $(ls -t /home/steam/pz_core_backup_*.tar.gz 2>/dev/null | head -n 1) 2>/dev/null || echo "NOT_FOUND"
             """
@@ -388,26 +391,26 @@ class SteamModMonitor(Star):
                         out = result.stdout.strip()
                         if "---SYS---" in out and "---BAK---" in out:
                             parts = out.split("---BAK---")
-                            sys_lines = [line.strip() for line in parts[0].split("---SYS---")[1].strip().split('\n') if line.strip()]
+                            sys_text = parts[0].split("---SYS---")[1].strip()
                             bak_line = parts[1].strip()
                             
-                            if len(sys_lines) >= 4:
-                                uptime_str = sys_lines[0]
-                                cpu_str = sys_lines[1] + "%"
-                                ram_str = sys_lines[2]
-                                disk_str = sys_lines[3]
+                            # 逐行解析键值对，再也不会因为少一行导致全部“未知”
+                            for line in sys_text.split('\n'):
+                                line = line.strip()
+                                if line.startswith("UPTIME|"): uptime_str = line.split('|', 1)[1]
+                                elif line.startswith("LOAD|"): cpu_str = line.split('|', 1)[1] + " (1分钟系统负载)"
+                                elif line.startswith("RAM|"): ram_str = line.split('|', 1)[1]
+                                elif line.startswith("DISK|"): disk_str = line.split('|', 1)[1]
                                 
                             if bak_line == "NOT_FOUND":
                                 backup_status_str = "⚠️ 未找到任何备份文件"
                             else:
-                                # 解析：2026-03-02 05:00:00.000000000 +0800|154012|/home/steam/...tar.gz
                                 bak_parts = bak_line.split('|')
                                 if len(bak_parts) >= 3:
-                                    date_str = bak_parts[0].split('.')[0] # 截取掉毫秒
+                                    date_str = bak_parts[0].split('.')[0] 
                                     size_mb = round(int(bak_parts[1]) / (1024 * 1024), 2)
                                     file_name = bak_parts[2].split('/')[-1]
                                     
-                                    # 检查是否是今天生成的
                                     now_date = datetime.datetime.now().strftime("%Y-%m-%d")
                                     is_today = now_date in date_str
                                     
@@ -428,7 +431,7 @@ class SteamModMonitor(Star):
             "🖥️ 宿主机 (Ubuntu) 物理状态\n"
             f"🔌 SSH状态：{ssh_status}\n"
             f"⏱️ 运行时间：{uptime_str}\n"
-            f"🧠 CPU 负载：{cpu_str}\n"
+            f"🧠 系统负载：{cpu_str}\n"
             f"💽 内存占用：{ram_str}\n"
             f"💾 磁盘空间：{disk_str}\n\n"
             
