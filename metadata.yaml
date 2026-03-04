@@ -2,7 +2,7 @@ name: astrbot_plugin_steammod_monitor
 desc: 用于监控steam的创意工坊和mod状态变更，并在状态变化时推送通知。硬核游戏服主（僵尸毁灭工程、方舟、Rust等）打造的“赛博网监”级 AstrBot 插件。 彻底告别“玩家进不去服务器才发现模组更新”的窘境，实现全自动更新预警与优雅的群组推送和管理！
 author: danfong1104
 repo: https://github.com/danfong1104/astrbot_plugin_steammod_monitor
-version: 5.3.1
+version: 5.3.2
 tags:
   - steam 
 social_link: https://github.com/danfong1104
